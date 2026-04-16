@@ -4,7 +4,6 @@ import numpy as np
 import yfinance as yf
 import akshare as ak
 from sklearn.ensemble import RandomForestClassifier
-from datetime import datetime
 import warnings
 
 # --- 基础配置 ---
@@ -19,12 +18,12 @@ def get_v24_css():
         .env-card { background: #1a1a1a; color: #ffd700; border: 1px solid #444; border-radius: 10px; padding: 15px; margin-bottom: 20px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         .stat-box { background: #262626; padding: 10px; border-radius: 6px; text-align: center; border-bottom: 2px solid #ffd700; }
-        .info-sidebar { background: #fdf2f2; border-left: 4px solid #cc0000; padding: 15px; border-radius: 4px; font-size: 0.9rem; }
+        .info-sidebar { font-size: 0.9rem; line-height: 1.6; }
     </style>
     """
 
-# --- 2. 核心诊断引擎 ---
-@st.cache_data(ttl=3600) # 缓存1小时，避免重复请求akshare
+# --- 2. 核心诊断引擎 (已集成 ATR 动态逻辑) ---
+@st.cache_data(ttl=3600)
 def get_a_shares_pool():
     try:
         df_300 = ak.index_stock_cons_csindex(symbol="000300")
@@ -32,7 +31,7 @@ def get_a_shares_pool():
         return { (f"{row['成分券代码']}.SS" if row['成分券代码'].startswith('60') else f"{row['成分券代码']}.SZ"): row['成分券名称']
                 for _, row in df_top.iterrows() }
     except:
-        return {"600519.SS": "贵州茅台", "300750.SZ": "宁德时代", "601318.SS": "中国平安", "000858.SZ": "五粮液"}
+        return {"600519.SS": "贵州茅台", "300750.SZ": "宁德时代", "601318.SS": "中国平安"}
 
 def diagnostic_engine_a(ticker, name, risk_weight):
     try:
@@ -46,13 +45,17 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         
-        # A股增强因子：波动率与RSI
+        # ATR 波动率计算 (新增强点)
+        df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
+        atr_now = df['ATR'].iloc[-1]
+        
+        # RSI 因子
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 标签：5日内涨幅 > 6%
+        # 标签：5日内最大涨幅 > 6%
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
         
         feats = ['Vol_Ratio', 'Bias', 'RSI']
@@ -64,39 +67,48 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         last_feat = df[feats].iloc[[-1]].values
         win_p = float(rf.predict_proba(last_feat)[0][1])
         
+        # EV 与 评分
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         score = win_p * ev * risk_weight * 1000
         
         curr_price = df['Close'].iloc[-1]
+        
+        # 动态止盈止损 (基于 ATR)
+        # 止盈设为 2.5 倍波动，止损设为 1.5 倍波动，更加适配个股股性
+        tp_price = curr_price + (atr_now * 2.5)
+        sl_price = curr_price - (atr_now * 1.5)
+        
         return {
             '代码': ticker, '名称': name, '现价': round(curr_price, 2),
-            '预测胜率': f"{win_p:.1%}", '期望值': f"{ev*100:+.2f}%", 
+            '预测胜率': f"{win_p:.1%}", 
+            '期望值': f"{ev*100:+.2f}%", 
+            '止盈参考': round(tp_price, 2), 
+            '止损建议': round(sl_price, 2),
             '综合评分': round(score, 2),
-            '止盈参考': round(curr_price * 1.08, 2), 
-            '止损建议': round(curr_price * 0.96, 2),
-            'Score_Raw': score # 用于排序
+            'Score_Raw': score 
         }
     except: return None
 
-# --- 3. Streamlit 界面 ---
+# --- 3. Streamlit 界面布局 ---
 st.markdown(get_v24_css(), unsafe_allow_html=True)
-st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>沪深300核心资产量化扫描系统</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>A股核心资产量化诊断系统</p></div>', unsafe_allow_html=True)
 
-# 侧边栏：简介与手册
+# 侧边栏
 with st.sidebar:
     st.markdown("### 📖 系统简介")
     st.markdown("""
-    本系统采用 **Random Forest (随机森林)** 机器学习模型，针对 A 股 T+1 交易制度进行优化。通过分析量价乖离度 (Bias) 和相对强弱指数 (RSI) 预测未来 5 个交易日的获利概率。
+    本系统采用 **机器学习 (RF)** 融合 **ATR 波动率算法**。
+    针对 A 股 T+1 制度，重点捕捉量价乖离后的回归机会。
     """)
     st.markdown("---")
-    st.markdown("### 🛠️ 操作手册")
-    st.write("1. **全局扫描**：一键分析沪深 300 前 50 大权重蓝筹股。")
-    st.write("2. **精确打击**：输入 A 股代码（如 600519.SS 或 000001.SZ）。")
-    st.write("3. **评分规则**：综合评分 > 5 为关注，> 10 为强信号。")
+    st.markdown("### 🛠️ 使用手册")
+    st.write("1. **权重扫描**：自动分析沪深300中权数最高的蓝筹标的。")
+    st.write("2. **精确打击**：支持手动输入，如 `600519.SS`。")
+    st.write("3. **动态止盈**：系统根据个股近 14 天的平均波动幅度自动锁定目标位。")
     st.markdown("---")
-    st.info("💡 提示：A 股数据建议在收盘后（15:30）或开盘半小时后观察。")
+    st.info("数据来源：Yahoo Finance / AkShare")
 
-# 主界面：环境评估
+# 顶部大盘环境评估
 m_ticker = "000300.SS"
 m_df = yf.download(m_ticker, period="100d", progress=False)
 
@@ -111,19 +123,24 @@ if not m_df.empty:
     
     st.markdown(f"""
     <div class="env-card">
-        <div style="margin-bottom:10px; font-weight:bold;">🚨 A股宏观情绪监测 (沪深300基准)</div>
+        <div style="margin-bottom:10px; font-weight:bold;">🚨 A股宏观情绪监测 (沪深300)</div>
         <div class="grid-2">
-            <div class="stat-box"><small>基准点位</small><br><b>{m_close:.2f}</b></div>
-            <div class="stat-box"><small>当前策略</small><br><b>{m_status} (风控系数: {risk_weight})</b></div>
+            <div class="stat-box"><small>当前点位</small><br><b>{m_close:.2f}</b></div>
+            <div class="stat-box"><small>战术环境</small><br><b>{m_status} (系数: {risk_weight})</b></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
+else:
+    risk_weight = 0.8
 
 # 功能标签页
 tab1, tab2 = st.tabs(["🚀 沪深300权重扫描", "🔍 任意标的诊断"])
 
+# 定义统一的显示列，确保“止盈”和“止损”不会被漏掉
+DISPLAY_COLS = ['代码', '名称', '现价', '预测胜率', '期望值', '止盈参考', '止损建议', '综合评分']
+
 with tab1:
-    if st.button("开始扫描核心资产"):
+    if st.button("开始执行全量扫描"):
         pool = get_a_shares_pool()
         results = []
         progress_bar = st.progress(0)
@@ -134,14 +151,15 @@ with tab1:
         
         if results:
             df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(10)
-            st.table(df_final.drop(columns=['Score_Raw']))
+            st.subheader("🔥 核心资产最佳机会 Top 10")
+            # 使用 st.table 确保在各种屏幕下都能强制显示完整列
+            st.table(df_final[DISPLAY_COLS])
         else:
-            st.warning("当前市场环境下未发现符合期望的标的。")
+            st.warning("当前环境下暂无高分标的。")
 
 with tab2:
-    st.write("请输入 A 股代码，格式示例：`600519.SS` (沪市) 或 `000001.SZ` (深市)")
-    user_input = st.text_input("代码列表（用空格分隔）", "600519.SS 300750.SZ 000001.SZ")
-    if st.button("执行诊断"):
+    user_input = st.text_input("请输入 A 股代码，格式示例：`600519.SS` (沪市) 或 `000001.SZ` (深市)")
+    if st.button("开始精准诊断"):
         tickers = user_input.replace(',', ' ').split()
         results = []
         for t in tickers:
@@ -150,6 +168,11 @@ with tab2:
         
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
-            st.dataframe(df_user.drop(columns=['Score_Raw']).style.background_gradient(subset=['综合评分'], cmap='YlOrRd'))
+            st.subheader("📊 诊断报告")
+            # 交互式表格显示
+            st.dataframe(
+                df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
+                use_container_width=True
+            )
         else:
-            st.error("无法获取数据，请检查代码格式是否正确。")
+            st.error("未获取到数据，请检查代码后缀是否为 .SS(沪) 或 .SZ(深)")
