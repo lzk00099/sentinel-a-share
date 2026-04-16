@@ -14,15 +14,16 @@ st.set_page_config(page_title="SENTINEL A-Share V24", layout="wide")
 def get_v24_css():
     return """
     <style>
-        .main-header { background: linear-gradient(135deg, #800000 0%, #333 100%); color: #ffd700; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px; }
-        .env-card { background: #1a1a1a; color: #ffd700; border: 1px solid #444; border-radius: 10px; padding: 15px; margin-bottom: 20px; }
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        .stat-box { background: #262626; padding: 10px; border-radius: 6px; text-align: center; border-bottom: 2px solid #ffd700; }
-        .info-sidebar { font-size: 0.9rem; line-height: 1.6; }
+        .main-header { background: linear-gradient(135deg, #800000 0%, #333 100%); color: #ffd700; padding: 25px; border-radius: 12px; text-align: center; margin-bottom: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .env-card { background: #1a1a1a; color: #ffd700; border: 1px solid #444; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .stat-box { background: #262626; padding: 12px; border-radius: 8px; text-align: center; border-bottom: 3px solid #ffd700; }
+        .sidebar-box { background: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #cc0000; margin-bottom: 15px; color: #333; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .u-tips { font-size: 0.85rem; color: #666; line-height: 1.5; }
     </style>
     """
 
-# --- 2. 核心诊断引擎 (已集成 ATR 动态逻辑) ---
+# --- 2. 核心诊断引擎 ---
 @st.cache_data(ttl=3600)
 def get_a_shares_pool():
     try:
@@ -39,23 +40,18 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         if len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # 特征工程
         df['Ret'] = df['Close'].pct_change()
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
-        
-        # ATR 波动率计算 (新增强点)
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         atr_now = df['ATR'].iloc[-1]
         
-        # RSI 因子
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 标签：5日内最大涨幅 > 6%
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
         
         feats = ['Vol_Ratio', 'Bias', 'RSI']
@@ -67,14 +63,10 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         last_feat = df[feats].iloc[[-1]].values
         win_p = float(rf.predict_proba(last_feat)[0][1])
         
-        # EV 与 评分
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         score = win_p * ev * risk_weight * 1000
         
         curr_price = df['Close'].iloc[-1]
-        
-        # 动态止盈止损 (基于 ATR)
-        # 止盈设为 2.5 倍波动，止损设为 1.5 倍波动，更加适配个股股性
         tp_price = curr_price + (atr_now * 2.5)
         sl_price = curr_price - (atr_now * 1.5)
         
@@ -91,22 +83,47 @@ def diagnostic_engine_a(ticker, name, risk_weight):
 
 # --- 3. Streamlit 界面布局 ---
 st.markdown(get_v24_css(), unsafe_allow_html=True)
-st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>A股核心资产量化诊断系统</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>沪深300核心资产量化扫描系统 • 机器学习增强版</p></div>', unsafe_allow_html=True)
 
-# 侧边栏
+# 侧边栏：优化后的系统简介与操作手册
 with st.sidebar:
-    st.markdown("### 📖 系统简介")
+    st.markdown("### 🧬 系统逻辑简介")
     st.markdown("""
-    本系统采用 **机器学习 (RF)** 融合 **ATR 波动率算法**。
-    针对 A 股 T+1 制度，重点捕捉量价乖离后的回归机会。
-    """)
-    st.markdown("---")
-    st.markdown("### 🛠️ 使用手册")
-    st.write("1. **权重扫描**：自动分析沪深300中权数最高的蓝筹标的。")
-    st.write("2. **精确打击**：支持手动输入，如 `600519.SS`。")
-    st.write("3. **动态止盈**：系统根据个股近 14 天的平均波动幅度自动锁定目标位。")
-    st.markdown("---")
-    st.info("数据来源：Yahoo Finance / AkShare")
+    <div class="sidebar-box">
+    本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型，专为 A 股 T+1 环境定制。
+    <br><br>
+    <b>核心因子：</b>
+    <li><b>Bias (量价乖离):</b> 监控价格回归动能。</li>
+    <li><b>RSI (强弱对比):</b> 评估超买超卖极端情绪。</li>
+    <li><b>Vol_Ratio (量能修正):</b> 过滤无量假拉升。</li>
+    <li><b>ATR (动态波幅):</b> 自动适配不同股性的震荡空间。</li>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🕒 最佳运行时间")
+    st.markdown("""
+    <div class="sidebar-box">
+    <b>1. 盘前观察 (09:15-09:25):</b>
+    查看大盘风控乘数，制定当日仓位基调。
+    <br><br>
+    <b>2. 盘中确认 (10:30 & 14:00):</b>
+    此时量能比值最具参考性，适合捕捉趋势。
+    <br><br>
+    <b>3. 尾盘博弈 (14:45):</b>
+    锁定次日 T+1 期望值，过滤单日波动噪声。
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🛠️ 操作手册")
+    st.markdown("""
+    <div class="u-tips">
+    <li><b>评分 > 10:</b> 强信号，建议关注。</li>
+    <li><b>评分 5-10:</b> 观察信号，需结合板块效应。</li>
+    <li><b>评分 < 0:</b> 避险区域，模型判定期望值为负。</li>
+    <br>
+    <i>*注：止盈止损已根据个股 ATR 自动动态调整，无需人工计算。</i>
+    </div>
+    """, unsafe_allow_html=True)
 
 # 顶部大盘环境评估
 m_ticker = "000300.SS"
@@ -119,14 +136,14 @@ if not m_df.empty:
     m_ma60 = m_df['Close'].rolling(60).mean().iloc[-1]
     
     risk_weight = 1.2 if m_close > m_ma20 else 0.8 if m_close > m_ma60 else 0.5
-    m_status = "强势反弹" if m_close > m_ma20 else "缩量回调" if m_close > m_ma60 else "多头禁区"
+    m_status = "强势反弹 (进攻)" if m_close > m_ma20 else "缩量回调 (观察)" if m_close > m_ma60 else "空头趋势 (避险)"
     
     st.markdown(f"""
     <div class="env-card">
-        <div style="margin-bottom:10px; font-weight:bold;">🚨 A股宏观情绪监测 (沪深300)</div>
+        <div style="margin-bottom:12px; font-weight:bold; font-size:1.1rem; border-left:4px solid #ffd700; padding-left:10px;">🚨 A股宏观情绪监测</div>
         <div class="grid-2">
-            <div class="stat-box"><small>当前点位</small><br><b>{m_close:.2f}</b></div>
-            <div class="stat-box"><small>战术环境</small><br><b>{m_status} (系数: {risk_weight})</b></div>
+            <div class="stat-box"><small>沪深300指数</small><br><b style="font-size:1.4rem;">{m_close:.2f}</b></div>
+            <div class="stat-box"><small>战术环境建议</small><br><b style="font-size:1.4rem;">{m_status}</b></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -134,13 +151,13 @@ else:
     risk_weight = 0.8
 
 # 功能标签页
-tab1, tab2 = st.tabs(["🚀 沪深300权重扫描", "🔍 任意标的诊断"])
+tab1, tab2 = st.tabs(["🚀 核心资产 Top 50 扫描", "🔍 跨市场标的单兵诊断"])
 
-# 定义统一的显示列，确保“止盈”和“止损”不会被漏掉
 DISPLAY_COLS = ['代码', '名称', '现价', '预测胜率', '期望值', '止盈参考', '止损建议', '综合评分']
 
 with tab1:
-    if st.button("开始执行全量扫描"):
+    st.write("点击下方按钮，系统将实时抓取沪深 300 权重前 50 标的并运行机器学习引擎。")
+    if st.button("开始全量量化扫描"):
         pool = get_a_shares_pool()
         results = []
         progress_bar = st.progress(0)
@@ -150,16 +167,16 @@ with tab1:
             progress_bar.progress((i + 1) / len(pool))
         
         if results:
-            df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(10)
-            st.subheader("🔥 核心资产最佳机会 Top 10")
-            # 使用 st.table 确保在各种屏幕下都能强制显示完整列
+            df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(12)
+            st.subheader("🔥 SENTINEL 选股池 (高期望值标的)")
             st.table(df_final[DISPLAY_COLS])
         else:
-            st.warning("当前环境下暂无高分标的。")
+            st.warning("⚠️ 当前市场环境下，模型未发现具有正向期望值的标的，建议持币观望。")
 
 with tab2:
-    user_input = st.text_input("请输入 A 股代码，格式示例：`600519.SS` (沪市) 或 `000001.SZ` (深市)")
-    if st.button("开始精准诊断"):
+    st.write("输入 A 股代码（含后缀），支持多代码批量诊断。")
+    user_input = st.text_input("示例：600519.SS 300750.SZ 000001.SZ", "600519.SS 300750.SZ 601318.SS")
+    if st.button("执行精准诊断"):
         tickers = user_input.replace(',', ' ').split()
         results = []
         for t in tickers:
@@ -169,10 +186,9 @@ with tab2:
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.subheader("📊 诊断报告")
-            # 交互式表格显示
             st.dataframe(
                 df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
                 use_container_width=True
             )
         else:
-            st.error("未获取到数据，请检查代码后缀是否为 .SS(沪) 或 .SZ(深)")
+            st.error("数据抓取失败。请确保输入格式正确（如 600519.SS）。")
