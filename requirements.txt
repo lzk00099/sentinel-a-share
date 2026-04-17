@@ -4,4 +4,3 @@ yfinance
 akshare
 scikit-learn
 streamlit
-
