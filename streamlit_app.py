@@ -8,38 +8,55 @@ import warnings
 
 # --- 基础配置 ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="SENTINEL A-Share V24", layout="wide")
+st.set_page_config(page_title="SENTINEL A-Share V24.1", layout="wide")
 
-# --- 1. A股专用 CSS 渲染 ---
+# --- 1. A股专用 CSS (增强色彩感) ---
 def get_v24_css():
     return """
     <style>
-        .main-header { background: linear-gradient(135deg, #800000 0%, #333 100%); color: #ffd700; padding: 25px; border-radius: 12px; text-align: center; margin-bottom: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .main-header { background: linear-gradient(135deg, #800000 0%, #333 100%); color: #ffd700; padding: 25px; border-radius: 12px; text-align: center; margin-bottom: 25px; }
         .env-card { background: #1a1a1a; color: #ffd700; border: 1px solid #444; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         .stat-box { background: #262626; padding: 12px; border-radius: 8px; text-align: center; border-bottom: 3px solid #ffd700; }
-        .sidebar-box { background: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #cc0000; margin-bottom: 15px; color: #333; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-        .u-tips { font-size: 0.85rem; color: #666; line-height: 1.5; }
+        .sidebar-box { background: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #cc0000; margin-bottom: 15px; color: #333; }
     </style>
     """
 
-# --- 2. 核心诊断引擎 ---
+# --- 2. 增强型数据中心 (换手率与资金流) ---
+@st.cache_data(ttl=600)
+def get_a_market_snapshot():
+    """获取全市场快照，包含名称、换手率和资金净占比"""
+    try:
+        df = ak.stock_zh_a_spot_em()
+        # 映射代码格式 000001 -> 000001.SZ
+        df['ticker'] = df['代码'].apply(lambda x: f"{x}.SS" if x.startswith('60') or x.startswith('68') else f"{x}.SZ")
+        return df.set_index('ticker')[['名称', '换手率', '主力净流入-净占比']]
+    except:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=3600)
-def get_a_shares_pool():
+def get_hs300_pool():
     try:
         df_300 = ak.index_stock_cons_csindex(symbol="000300")
-        df_top = df_300.head(50)
-        return { (f"{row['成分券代码']}.SS" if row['成分券代码'].startswith('60') else f"{row['成分券代码']}.SZ"): row['成分券名称']
-                for _, row in df_top.iterrows() }
+        return df_300['成分券代码'].tolist()
     except:
-        return {"600519.SS": "贵州茅台", "300750.SZ": "宁德时代", "601318.SS": "中国平安"}
+        return ["600519", "300750", "601318"]
 
-def diagnostic_engine_a(ticker, name, risk_weight):
+# --- 3. 核心诊断引擎 ---
+def diagnostic_engine_a(ticker, snapshot, risk_weight):
     try:
-        df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
+        # 获取名称及附加指标
+        raw_code = ticker.split('.')[0]
+        name = snapshot.loc[ticker, '名称'] if ticker in snapshot.index else "未知"
+        turnover = snapshot.loc[ticker, '换手率'] if ticker in snapshot.index else 0
+        money_flow = snapshot.loc[ticker, '主力净流入-净占比'] if ticker in snapshot.index else 0
+        
+        # 抓取历史数据
+        df = yf.download(ticker, period="200d", progress=False, auto_adjust=True)
         if len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
+        # 技术因子计算
         df['Ret'] = df['Close'].pct_change()
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
@@ -47,148 +64,111 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         atr_now = df['ATR'].iloc[-1]
         
+        # RSI
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
+        # 机器学习预测
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        
         feats = ['Vol_Ratio', 'Bias', 'RSI']
         train = df[feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=100, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        last_feat = df[feats].iloc[[-1]].values
-        win_p = float(rf.predict_proba(last_feat)[0][1])
+        win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
         
+        # 评分模型 (加入资金流修正)
+        flow_bonus = 1.1 if money_flow > 0 else 0.9
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
-        score = win_p * ev * risk_weight * 1000
+        score = win_p * ev * risk_weight * flow_bonus * 1000
         
         curr_price = df['Close'].iloc[-1]
-        tp_price = curr_price + (atr_now * 2.5)
-        sl_price = curr_price - (atr_now * 1.5)
-        
         return {
             '代码': ticker, '名称': name, '现价': round(curr_price, 2),
-            '预测胜率': f"{win_p:.1%}", 
-            '期望值': f"{ev*100:+.2f}%", 
-            '止盈参考': round(tp_price, 2), 
-            '止损建议': round(sl_price, 2),
-            '综合评分': round(score, 2),
-            'Score_Raw': score 
+            '换手率%': round(turnover, 2), '主力资金%': round(money_flow, 2),
+            '预测胜率': win_p, 
+            '期望值%': round(ev * 100, 2), 
+            '止盈参考': round(curr_price + atr_now * 2.5, 2), 
+            '止损建议': round(curr_price - atr_now * 1.5, 2),
+            '综合评分': round(score, 2)
         }
     except: return None
 
-# --- 3. Streamlit 界面布局 ---
+# --- 4. 界面渲染函数 ---
+def display_styled_df(results_list):
+    if not results_list:
+        st.warning("⚠️ 未发现符合正向期望值的标的。")
+        return
+    
+    df = pd.DataFrame(results_list).sort_values('综合评分', ascending=False)
+    
+    # 格式化百分比显示（仅用于显示）
+    df_styled = df.copy()
+    df_styled['预测胜率'] = df_styled['预测胜率'].map('{:.1%}'.format)
+
+    # 颜色渲染逻辑
+    def color_negative_red(val):
+        color = '#d32f2f' if val < 0 else '#2e7d32'
+        return f'color: {color}; font-weight: bold'
+
+    st.dataframe(
+        df_styled.style.applymap(color_negative_red, subset=['期望值%', '综合评分'])
+        .background_gradient(subset=['综合评分'], cmap='RdYlGn', vmin=-5, vmax=15),
+        use_container_width=True,
+        height=450
+    )
+
+# --- 5. Streamlit 主程序 ---
 st.markdown(get_v24_css(), unsafe_allow_html=True)
-st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>沪深300核心资产量化扫描系统 • 机器学习增强版</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24.1</h1><p>多因子机器学习诊断系统 (资金流/换手率增强版)</p></div>', unsafe_allow_html=True)
 
-# 侧边栏：优化后的系统简介与操作手册
+# 侧边栏
 with st.sidebar:
-    st.markdown("### 🧬 系统逻辑简介")
-    st.markdown("""
-    <div class="sidebar-box">
-    本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型，专为 A 股 T+1 环境定制。
-    <br><br>
-    <b>核心因子：</b>
-    <li><b>Bias (量价乖离):</b> 监控价格回归动能。</li>
-    <li><b>RSI (强弱对比):</b> 评估超买超卖极端情绪。</li>
-    <li><b>Vol_Ratio (量能修正):</b> 过滤无量假拉升。</li>
-    <li><b>ATR (动态波幅):</b> 自动适配不同股性的震荡空间。</li>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 🧬 核心因子说明")
+    st.markdown("""<div class="sidebar-box">
+    <b>换手率:</b> 监控个股活跃度及筹码交换频率。<br>
+    <b>主力资金:</b> 追踪大单净流入占比(EM数据)。<br>
+    <b>动态ATR:</b> 基于波动率自适应止盈止损。</div>""", unsafe_allow_html=True)
+    st.info("🕒 最佳建议：收盘前15分钟观察模型结论，锁定T+1胜率。")
 
-    st.markdown("### 🕒 最佳运行时间")
-    st.markdown("""
-    <div class="sidebar-box">
-    <b>1. 盘前观察 (09:15-09:25):</b>
-    查看大盘风控乘数，制定当日仓位基调。
-    <br><br>
-    <b>2. 盘中确认 (10:30 & 14:00):</b>
-    此时量能比值最具参考性，适合捕捉趋势。
-    <br><br>
-    <b>3. 尾盘博弈 (14:45):</b>
-    锁定次日 T+1 期望值，过滤单日波动噪声。
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("### 🛠️ 操作手册")
-    st.markdown("""
-    <div class="u-tips">
-    <li><b>评分 > 10:</b> 强信号，建议关注。</li>
-    <li><b>评分 5-10:</b> 观察信号，需结合板块效应。</li>
-    <li><b>评分 < 0:</b> 避险区域，模型判定期望值为负。</li>
-    <br>
-    <i>*注：止盈止损已根据个股 ATR 自动动态调整，无需人工计算。</i>
-    </div>
-    """, unsafe_allow_html=True)
-
-# 顶部大盘环境评估
-m_ticker = "000300.SS"
-m_df = yf.download(m_ticker, period="100d", progress=False)
-
+# 环境评估
+snapshot = get_a_market_snapshot()
+m_df = yf.download("000300.SS", period="100d", progress=False)
+risk_weight = 0.8
 if not m_df.empty:
     if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
     m_close = m_df['Close'].iloc[-1]
     m_ma20 = m_df['Close'].rolling(20).mean().iloc[-1]
-    m_ma60 = m_df['Close'].rolling(60).mean().iloc[-1]
-    
-    risk_weight = 1.2 if m_close > m_ma20 else 0.8 if m_close > m_ma60 else 0.5
-    m_status = "强势反弹 (进攻)" if m_close > m_ma20 else "缩量回调 (观察)" if m_close > m_ma60 else "空头趋势 (避险)"
-    
-    st.markdown(f"""
-    <div class="env-card">
-        <div style="margin-bottom:12px; font-weight:bold; font-size:1.1rem; border-left:4px solid #ffd700; padding-left:10px;">🚨 A股宏观情绪监测</div>
-        <div class="grid-2">
-            <div class="stat-box"><small>沪深300指数</small><br><b style="font-size:1.4rem;">{m_close:.2f}</b></div>
-            <div class="stat-box"><small>战术环境建议</small><br><b style="font-size:1.4rem;">{m_status}</b></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-else:
-    risk_weight = 0.8
+    risk_weight = 1.2 if m_close > m_ma20 else 0.8
+    st.markdown(f"""<div class="env-card"><div class="grid-2">
+    <div class="stat-box"><small>沪深300</small><br><b>{m_close:.2f}</b></div>
+    <div class="stat-box"><small>风控权重</small><br><b>{risk_weight}</b></div>
+    </div></div>""", unsafe_allow_html=True)
 
-# 功能标签页
-tab1, tab2 = st.tabs(["🚀 核心资产 Top 50 扫描", "🔍 跨市场标的单兵诊断"])
-
-DISPLAY_COLS = ['代码', '名称', '现价', '预测胜率', '期望值', '止盈参考', '止损建议', '综合评分']
+# 标签页同步
+tab1, tab2 = st.tabs(["🚀 核心资产权重扫描", "🔍 个股精准诊断"])
 
 with tab1:
-    st.write("点击下方按钮，系统将实时抓取沪深 300 权重前 50 标的并运行机器学习引擎。")
-    if st.button("开始全量量化扫描"):
-        pool = get_a_shares_pool()
+    if st.button("全量诊断 沪深300 前50"):
+        pool_codes = get_hs300_pool()[:50]
         results = []
-        progress_bar = st.progress(0)
-        for i, (t, n) in enumerate(pool.items()):
-            res = diagnostic_engine_a(t, n, risk_weight)
+        bar = st.progress(0)
+        for i, c in enumerate(pool_codes):
+            ticker = f"{c}.SS" if c.startswith('60') or c.startswith('68') else f"{c}.SZ"
+            res = diagnostic_engine_a(ticker, snapshot, risk_weight)
             if res: results.append(res)
-            progress_bar.progress((i + 1) / len(pool))
-        
-        if results:
-            df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(12)
-            st.subheader("🔥 SENTINEL 选股池 (高期望值标的)")
-            st.table(df_final[DISPLAY_COLS])
-        else:
-            st.warning("⚠️ 当前市场环境下，模型未发现具有正向期望值的标的，建议持币观望。")
+            bar.progress((i+1)/len(pool_codes))
+        display_styled_df(results)
 
 with tab2:
-    st.write("输入 A 股代码（含后缀），支持多代码批量诊断。")
-    user_input = st.text_input("示例：600519.SS 300750.SZ 000001.SZ", "600519.SS 300750.SZ 601318.SS")
-    if st.button("执行精准诊断"):
-        tickers = user_input.replace(',', ' ').split()
+    codes_input = st.text_input("输入代码 (示例: 600519.SS 000001.SZ)", "600519.SS 300750.SZ 601318.SS")
+    if st.button("开始单兵诊断"):
         results = []
+        tickers = codes_input.replace(',', ' ').split()
         for t in tickers:
-            res = diagnostic_engine_a(t, "手动查询", risk_weight)
+            res = diagnostic_engine_a(t, snapshot, risk_weight)
             if res: results.append(res)
-        
-        if results:
-            df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
-            st.subheader("📊 诊断报告")
-            st.dataframe(
-                df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
-                use_container_width=True
-            )
-        else:
-            st.error("数据抓取失败。请确保输入格式正确（如 600519.SS）。")
+        display_styled_df(results)
