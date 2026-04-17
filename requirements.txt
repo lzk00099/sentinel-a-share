@@ -1,7 +1,6 @@
-pandas
-numpy
-yfinance
-akshare
-scikit-learn
-streamlit
-matplotlib
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+akshare>=1.16.1
+yfinance>=0.2.28
