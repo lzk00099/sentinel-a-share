@@ -1,6 +1,8 @@
-streamlit
 pandas
 numpy
 yfinance
-akshare --upgrade
+akshare
 scikit-learn
+streamlit
+matplotlib
+
