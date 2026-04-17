@@ -10,7 +10,7 @@ import warnings
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="SENTINEL A-Share V24", layout="wide")
 
-# --- 1. A股专用 CSS 渲染 ---
+# --- 1. A股专用 CSS 渲染（强化颜色表现）---
 def get_v24_css():
     return """
     <style>
@@ -20,10 +20,29 @@ def get_v24_css():
         .stat-box { background: #262626; padding: 12px; border-radius: 8px; text-align: center; border-bottom: 3px solid #ffd700; }
         .sidebar-box { background: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #cc0000; margin-bottom: 15px; color: #333; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
         .u-tips { font-size: 0.85rem; color: #666; line-height: 1.5; }
+        /* 表格颜色增强 */
+        .dataframe th { background-color: #2c2c2c; color: #ffd700; }
+        .dataframe td { font-size: 0.9rem; }
     </style>
     """
 
-# --- 2. 核心诊断引擎 ---
+# --- 2. 辅助函数：获取A股股票名称（带缓存）---
+@st.cache_data(ttl=3600)
+def get_all_stock_names():
+    """获取全市场A股代码->名称映射，用于手动诊断模块"""
+    try:
+        df = ak.stock_zh_a_spot()
+        return dict(zip(df['代码'], df['名称']))
+    except Exception:
+        return {}
+
+def get_stock_name(ticker):
+    """根据ticker（如600519.SS）返回中文名称"""
+    code = ticker.split('.')[0]
+    name_map = get_all_stock_names()
+    return name_map.get(code, ticker)  # 若获取失败则返回代码本身
+
+# --- 3. 核心诊断引擎（保持不变）---
 @st.cache_data(ttl=3600)
 def get_a_shares_pool():
     try:
@@ -81,11 +100,25 @@ def diagnostic_engine_a(ticker, name, risk_weight):
         }
     except: return None
 
-# --- 3. Streamlit 界面布局 ---
+# --- 4. 统一表格样式函数（使两个引擎外观一致）---
+def style_dataframe(df):
+    """对综合评分列应用渐变，对期望值列根据正负设置颜色"""
+    styled = df.style.background_gradient(subset=['综合评分'], cmap='RdYlGn', low=0, high=20)
+    # 额外美化期望值列：正收益绿色，负收益红色
+    def color_expect(val):
+        if isinstance(val, str) and val.startswith('+'):
+            return 'color: #00cc66'
+        elif isinstance(val, str) and val.startswith('-'):
+            return 'color: #ff4d4d'
+        return ''
+    styled = styled.applymap(color_expect, subset=['期望值'])
+    return styled
+
+# --- 5. Streamlit 界面布局 ---
 st.markdown(get_v24_css(), unsafe_allow_html=True)
 st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24</h1><p>沪深300核心资产量化扫描系统 • 机器学习增强版</p></div>', unsafe_allow_html=True)
 
-# 侧边栏：优化后的系统简介与操作手册
+# 侧边栏（保持不变）
 with st.sidebar:
     st.markdown("### 🧬 系统逻辑简介")
     st.markdown("""
@@ -169,7 +202,8 @@ with tab1:
         if results:
             df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(12)
             st.subheader("🔥 SENTINEL 选股池 (高期望值标的)")
-            st.table(df_final[DISPLAY_COLS])
+            # 统一使用带样式的 DataFrame
+            st.dataframe(style_dataframe(df_final[DISPLAY_COLS]), use_container_width=True)
         else:
             st.warning("⚠️ 当前市场环境下，模型未发现具有正向期望值的标的，建议持币观望。")
 
@@ -180,15 +214,15 @@ with tab2:
         tickers = user_input.replace(',', ' ').split()
         results = []
         for t in tickers:
-            res = diagnostic_engine_a(t, "手动查询", risk_weight)
+            # 获取真实股票名称
+            real_name = get_stock_name(t)
+            res = diagnostic_engine_a(t, real_name, risk_weight)
             if res: results.append(res)
         
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.subheader("📊 诊断报告")
-            st.dataframe(
-                df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
-                use_container_width=True
-            )
+            # 应用与全量扫描完全相同的表格样式
+            st.dataframe(style_dataframe(df_user[DISPLAY_COLS]), use_container_width=True)
         else:
-            st.error("数据抓取失败。请确保输入格式正确（如 600519.SS）。") 仔细分析一下这个app，两个部分部分加上颜色美化，并让输入扫描部分的股票名字能正常显示，并让两个引擎同步（输出的外观一致），其他不要改动
+            st.error("数据抓取失败。请确保输入格式正确（如 600519.SS）。")
