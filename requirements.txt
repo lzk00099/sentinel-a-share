@@ -4,5 +4,4 @@ yfinance
 akshare
 scikit-learn
 streamlit
-matplotlib
 
