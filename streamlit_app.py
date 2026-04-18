@@ -58,7 +58,7 @@ def get_north_flow(symbol):
     return 0.0
 
 # --- 3. 核心诊断逻辑 (含机器学习) ---
-def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False):
+def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_name=None):
     try:
         # 1. 基础行情下载 (yfinance)
         time.sleep(0.2) # 基础避让
@@ -95,9 +95,24 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False):
         sl_price = curr_price - (atr_now * 1.5)
         
         # 5. 组装结果 (快照匹配)
-        symbol = ticker.split('.')[0]
-        name = snapshot.get(symbol, {}).get('名称', '未知')
-        turnover = snapshot.get(symbol, {}).get('换手率', 0.0)
+        symbol_6digit = ticker.split('.')[0]
+        snap_data = snapshot.get(symbol_6digit, {})
+        name = "未知"
+        if manual_name:
+            name = manual_name
+        elif snap_data.get('名称'):
+            name = snap_data.get('名称')
+        else:
+            # 单兵诊断保底：如果是 A 股，尝试快速获取名称
+            try:
+                if ".SS" in ticker or ".SZ" in ticker:
+                    # 使用一个更稳定的基础属性接口
+                    individual_info = ak.stock_individual_info_em(symbol=symbol_6digit)
+                    name = individual_info.iloc[0, 1] # 获取“股票简称”
+            except:
+                name = ticker # 实在拿不到就显示代码，比显示“未知”好
+        
+        turnover = snap_data.get('换手率', 0.0)
         
         # Pro版扩展：北向资金
         north_val = "跳过"
@@ -194,16 +209,17 @@ with tab1:
             )
 
 with tab2:
-    st.write("输入代码（上限5个），手动诊断模式默认开启 Pro 引擎（含北向资金）。")
-    user_input = st.text_input("示例：600519.SS 300750.SZ", "600519.SS 300750.SZ 601318.SS")
+    # ...
     if st.button("执行精准诊断"):
         snapshot = fetch_market_snapshot()
         tickers = user_input.replace(',', ' ').split()[:5]
         results = []
         for t in tickers:
             with st.spinner(f"深度诊断 {t}..."):
+                # 注意：这里不需要传 manual_name，交给引擎内部的保底逻辑
                 res = diagnostic_core(t, risk_weight, snapshot, include_pro=True)
                 if res: results.append(res)
+        # ... 显示表格 ...
         
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
