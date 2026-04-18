@@ -4,3 +4,4 @@ numpy
 yfinance
 akshare
 scikit-learn
+matplotlib
