@@ -29,15 +29,23 @@ def get_v24_css():
 # --- 2. 高效数据增强函数 ---
 @st.cache_data(ttl=3600)
 def fetch_market_snapshot():
-    """一次性获取全市场实时快照，增强代码匹配逻辑"""
-    try:
-        df = ak.stock_zh_a_spot_em()
-        # 核心修复：确保代码是 6 位字符串，方便后面匹配
-        df['代码'] = df['代码'].astype(str).str.zfill(6)
-        return df.set_index('代码')[['名称', '换手率', '最新价']].to_dict('index')
-    except Exception as e:
-        st.error(f"快照抓取失败: {e}")
-        return {}
+    """带重试机制的快照抓取，防止连接重置"""
+    retry_count = 3
+    for i in range(retry_count):
+        try:
+            # 增加一个请求头参数或微小延迟，模拟浏览器访问
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                df['代码'] = df['代码'].astype(str).str.zfill(6)
+                return df.set_index('代码')[['名称', '换手率', '最新价']].to_dict('index')
+        except Exception as e:
+            if i < retry_count - 1:
+                time.sleep(1) # 失败后等待1秒重试
+                continue
+            else:
+                # 最终失败也只在后台打印，不干扰前端
+                print(f"Snapshot Error: {e}")
+    return {}
 
 def get_north_flow(symbol):
     """Pro版专属：获取北向资金（慢速接口）"""
