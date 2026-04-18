@@ -29,12 +29,14 @@ def get_v24_css():
 # --- 2. 高效数据增强函数 ---
 @st.cache_data(ttl=3600)
 def fetch_market_snapshot():
-    """一次性获取全市场实时快照，极大提升换手率获取速度"""
+    """一次性获取全市场实时快照，增强代码匹配逻辑"""
     try:
         df = ak.stock_zh_a_spot_em()
-        # 建立代码到(名称, 换手率)的映射
-        return df.set_index('代码')[['名称', '换手率']].to_dict('index')
-    except:
+        # 核心修复：确保代码是 6 位字符串，方便后面匹配
+        df['代码'] = df['代码'].astype(str).str.zfill(6)
+        return df.set_index('代码')[['名称', '换手率', '最新价']].to_dict('index')
+    except Exception as e:
+        st.error(f"快照抓取失败: {e}")
         return {}
 
 def get_north_flow(symbol):
@@ -167,7 +169,10 @@ with tab1:
         
         for i, (t, n) in enumerate(pool.items()):
             status_text.text(f"正在扫描 ({i+1}/50): {n}...")
+            # 这里的 diagnostic_core 建议多加一个参数传递 n (即原始名称)
             res = diagnostic_core(t, risk_weight, snapshot, include_pro=is_pro)
+            if res and res['名称'] == "未知": 
+                res['名称'] = n  # 如果引擎没查到名字，用列表里的名字保底
             if res: results.append(res)
             progress_bar.progress((i + 1) / len(pool))
         
