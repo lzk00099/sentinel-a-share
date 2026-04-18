@@ -61,7 +61,7 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # 2. 指标计算（原有因子）
+        # 2. 指标计算
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
@@ -73,44 +73,13 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # --- 新增因子：换手率估算序列 ---
-        symbol_6digit = ticker.split('.')[0]
-        snap_data = snapshot.get(symbol_6digit, {})
-        turnover_today = snap_data.get('换手率', 0.0)  # 当日换手率（百分比）
-        
-        # 用当日成交量作为基准，估算历史换手率（假设流通股本不变）
-        latest_vol = df['Volume'].iloc[-1]
-        if latest_vol > 0 and turnover_today > 0:
-            df['Turnover'] = turnover_today * (df['Volume'] / latest_vol)
-        else:
-            df['Turnover'] = 0.0  # 若数据缺失，填充0
-        
-        # --- 新增因子：北向资金历史序列（Pro模式下启用）---
-        if include_pro:
-            north_today = get_north_flow(symbol_6digit)  # 当日净买入额（万元）
-            # 由于获取完整历史序列耗时过长，此处简化：历史均填充为当日值
-            # （实际应用中可替换为真实历史接口，此处保证特征列存在）
-            df['North_Flow'] = north_today
-        else:
-            df['North_Flow'] = 0.0  # 非Pro模式用0填充
-        
-        # 3. 机器学习模型（动态构建特征列表）
-        base_feats = ['Vol_Ratio', 'Bias', 'RSI']
-        extra_feats = ['Turnover']  # 换手率始终加入（免费午餐）
-        if include_pro:
-            extra_feats.append('North_Flow')  # Pro模式增加北向资金因子
-        
-        feats = base_feats + extra_feats
-        
-        # 目标变量构建
+        # 3. 机器学习模型
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
+        feats = ['Vol_Ratio', 'Bias', 'RSI']
         train = df[feats + ['Target']].dropna()
-        
-        # 训练模型（注意排除最后5行避免标签泄露）
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        # 预测最新一期的胜率
         win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         score = win_p * ev * risk_weight * 1000
@@ -121,6 +90,9 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
         sl_price = curr_price - (atr_now * 1.5)
         
         # 5. 组装结果与多维名称修复
+        symbol_6digit = ticker.split('.')[0]
+        snap_data = snapshot.get(symbol_6digit, {})
+        
         # 名称判定逻辑
         name = "未知"
         if manual_name:
@@ -133,9 +105,11 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
                     info_df = ak.stock_individual_info_em(symbol=symbol_6digit)
                     name = info_df.iloc[0, 1]
             except:
-                name = ticker
+                name = ticker # 最终保底显示代码
         
         turnover = snap_data.get('换手率', 0.0)
+        
+        # Pro版扩展
         north_val = "跳过"
         if include_pro:
             north_val = get_north_flow(symbol_6digit)
@@ -148,9 +122,7 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
             '换手率': f"{turnover:.2f}%", '北向资金(万)': north_val,
             '综合评分': round(score, 2), 'Score_Raw': score 
         }
-    except Exception as e:
-        # 为调试方便可打印异常，生产环境保持静默
-        # st.error(f"诊断 {ticker} 失败: {e}")
+    except:
         return None
 
 # --- 4. 界面渲染 ---
@@ -159,7 +131,7 @@ st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24 PRO</h1><
 
 with st.sidebar:
     st.markdown("### 🧬 系统逻辑简介")
-    st.markdown('<div class="sidebar-box">本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型，专为 A 股 T+1 环境定制。<br><br><b>核心因子：</b><li><b>Bias (量价乖离):</b> 监控价格回归动能。</li><li><b>RSI (强弱对比):</b> 评估超买超卖极端情绪。</li><li><b>Vol_Ratio (量能修正):</b> 过滤无量假拉升。</li><li><b>Turnover (换手率估算):</b> 捕捉流动性异常。</li><li><b>North_Flow (北向资金):</b> Pro版启用，跟踪聪明钱。</li><li><b>ATR (动态波幅):</b> 自动适配震荡空间。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-box">本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型，专为 A 股 T+1 环境定制。<br><br><b>核心因子：</b><li><b>Bias (量价乖离):</b> 监控价格回归动能。</li><li><b>RSI (强弱对比):</b> 评估超买超卖极端情绪。</li><li><b>Vol_Ratio (量能修正):</b> 过滤无量假拉升。</li><li><b>ATR (动态波幅):</b> 自动适配震荡空间。</div>', unsafe_allow_html=True)
     st.markdown("### 🕒 最佳运行时间")
     st.markdown('<div class="sidebar-box"><b>1. 盘前 (09:15):</b> 定调。<br><b>2. 盘中 (14:00):</b> 捕捉趋势。<br><b>3. 尾盘 (14:45):</b> 锁定期望值。</div>', unsafe_allow_html=True)
     st.markdown("### 🛠️ 操作手册")
