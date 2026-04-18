@@ -195,7 +195,7 @@ with tab1:
 
 with tab2:
     st.write("输入代码（上限5个），手动诊断模式默认开启 Pro 引擎（含北向资金）。")
-    user_input = st.text_input("示例：600519.SS 300750.SZ AAPL", "600519.SS 300750.SZ 601318.SS")
+    user_input = st.text_input("示例：600519.SS 300750.SZ", "600519.SS 300750.SZ 601318.SS")
     if st.button("执行精准诊断"):
         snapshot = fetch_market_snapshot()
         tickers = user_input.replace(',', ' ').split()[:5]
