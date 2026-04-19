@@ -52,12 +52,13 @@ def get_north_flow(symbol_6digit):
         pass
     return 0.0
 
-# --- 3. 核心诊断逻辑 (ML 特征增强 + 名字修复版) ---
+# --- 3. 核心诊断逻辑 (ML 特征增强版) ---
 def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_name=None):
     try:
         symbol_6digit = ticker.split('.')[0]
-        # 1. 数据下载：A股使用ak获取含换手率历史，非A股使用yf模拟
+        # 1. 差异化行情下载：A股使用ak以获取换手率历史，美股使用yf
         if ".SS" in ticker or ".SZ" in ticker:
+            # 获取历史数据（包含换手率用于训练）
             df_hist = ak.stock_zh_a_hist(symbol=symbol_6digit, period="daily", adjust="qfq")
             if df_hist.empty or len(df_hist) < 60: return None
             df = df_hist.rename(columns={'日期':'Date','开盘':'Open','收盘':'Close','最高':'High','最低':'Low','成交量':'Volume','换手率':'Turnover'})
@@ -66,9 +67,9 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
             df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
             if df.empty or len(df) < 60: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df['Turnover'] = (df['Volume'] / df['Volume'].rolling(20).mean()) * 2 # 模拟换手
+            df['Turnover'] = (df['Volume'] / df['Volume'].rolling(20).mean()) * 2 # 美股用量比模拟换手
         
-        # 2. 指标计算 (ML 特征池)
+        # 2. 指标计算 (ML 核心特征池)
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
@@ -80,43 +81,42 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 3. 机器学习模型 (Turnover 参与全引擎 ML 计算)
+        # 3. 机器学习模型 (升级：加入 Turnover 特征)
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover']
+        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] # 换手率进入全引擎 ML 计算
         train = df[feats + ['Target']].dropna()
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
+        # 预测与期望值
+        last_row = df[feats].iloc[[-1]].values
+        win_p = float(rf.predict_proba(last_row)[0][1])
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         
-        # 4. Pro版/单兵版：北向资金决策权重修正
+        # 4. Pro版/单兵版：北向资金决策增强
         north_val = "跳过"
         north_multiplier = 1.0
         if include_pro:
             north_val = get_north_flow(symbol_6digit)
+            # 如果北向大额净买入，正向修正评分逻辑
             if isinstance(north_val, float):
-                if north_val > 500: north_multiplier = 1.15
-                elif north_val < -500: north_multiplier = 0.85
+                if north_val > 500: north_multiplier = 1.15 # 强买入增益
+                elif north_val < -500: north_multiplier = 0.85 # 抛售减损
         
         score = win_p * ev * risk_weight * north_multiplier * 1000
         
-        # 5. 名字猎取逻辑 (核心修复点)
+        # 5. 组装结果与多维名称修复
         curr_price = df['Close'].iloc[-1]
         snap_data = snapshot.get(symbol_6digit, {})
         name = "未知"
-        if manual_name: 
-            name = manual_name
-        elif snap_data.get('名称'): 
-            name = snap_data.get('名称')
+        if manual_name: name = manual_name
+        elif snap_data.get('名称'): name = snap_data.get('名称')
         else:
             try:
                 if ".SS" in ticker or ".SZ" in ticker:
                     info_df = ak.stock_individual_info_em(symbol=symbol_6digit)
-                    # 修复：通过匹配 '股票简称' 获取值，避免索引错误
-                    name = info_df[info_df['item'] == '股票简称']['value'].values[0]
-            except: 
-                name = ticker # 最终保底
+                    name = info_df.iloc[0, 1]
+            except: name = ticker
         
         real_turnover = snap_data.get('换手率', df['Turnover'].iloc[-1])
 
@@ -129,7 +129,7 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
             '换手率': f"{real_turnover:.2f}%", '北向资金(万)': north_val,
             '综合评分': round(score, 2), 'Score_Raw': score 
         }
-    except:
+    except Exception as e:
         return None
 
 # --- 4. 界面渲染 ---
@@ -203,6 +203,7 @@ with tab2:
         results = []
         for t in tickers:
             with st.spinner(f"深度诊断 {t}..."):
+                # 单兵模式强制 include_pro=True 以包含北向和完整 ML 计算
                 res = diagnostic_core(t, risk_weight, snapshot, include_pro=True)
                 if res: results.append(res)
         
