@@ -11,7 +11,7 @@ import time
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="SENTINEL A-Share V24 PRO", layout="wide")
 
-# --- 1. CSS 渲染 (原封不动还原) ---
+# --- 1. CSS 渲染 (保持原封不动) ---
 def get_v24_css():
     return """
     <style>
@@ -29,7 +29,6 @@ def get_v24_css():
 # --- 2. 高效数据增强函数 ---
 @st.cache_data(ttl=3600)
 def fetch_market_snapshot():
-    """获取快照，增加健壮性"""
     retry_count = 2
     for i in range(retry_count):
         try:
@@ -38,13 +37,11 @@ def fetch_market_snapshot():
                 df['代码'] = df['代码'].astype(str).str.zfill(6)
                 return df.set_index('代码')[['名称', '换手率']].to_dict('index')
         except Exception:
-            if i < retry_count - 1:
-                time.sleep(1)
+            if i < retry_count - 1: time.sleep(1)
             continue
     return {}
 
 def get_north_flow(symbol_6digit):
-    """获取实时北向资金流向"""
     try:
         hsgt_df = ak.stock_hsgt_individual_em(symbol=symbol_6digit)
         if not hsgt_df.empty:
@@ -53,75 +50,75 @@ def get_north_flow(symbol_6digit):
         pass
     return 0.0
 
-# --- 3. 核心诊断逻辑 ---
+# --- 3. 核心诊断逻辑 (算法强化与修复) ---
 def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_name=None):
     try:
         symbol_6digit = ticker.split('.')[0]
-        # 1. 行情下载 (A股用ak获取换手率)
+        # 1. 差异化历史行情获取
         if ".SS" in ticker or ".SZ" in ticker:
-            df_hist = ak.stock_zh_a_hist(symbol=symbol_6digit, period="daily", adjust="qfq")
-            if df_hist.empty or len(df_hist) < 60:
-                return None
-            df = df_hist.rename(columns={'日期':'Date','开盘':'Open','收盘':'Close','最高':'High','最低':'Low','成交量':'Volume','换手率':'Turnover'})
-            df.set_index('Date', inplace=True)
+            df = ak.stock_zh_a_hist(symbol=symbol_6digit, period="daily", adjust="qfq")
+            if df.empty or len(df) < 60: return None
+            # 兼容性列名映射
+            col_map = {'日期':'Date','开盘':'Open','收盘':'Close','最高':'High','最低':'Low','成交量':'Volume','换手率':'Turnover'}
+            df = df.rename(columns=col_map)
+            # 确保关键特征列存在
+            if 'Turnover' not in df.columns: return None
         else:
             df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
-            if df.empty or len(df) < 60:
-                return None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df['Turnover'] = (df['Volume'] / df['Volume'].rolling(20).mean()) * 2
-        
-        # 2. 指标计算
+            if df.empty or len(df) < 60: return None
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            df['Turnover'] = (df['Volume'] / df['Volume'].rolling(20).mean()) * 2 # 全引擎换手率模拟
+
+        # 2. 特征工程 (ML 特征池)
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        atr_now = df['ATR'].iloc[-1]
         
+        # RSI 计算
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 3. 机器学习模型 (换手率 Turnover 加入全量计算)
+        # 3. 随机森林训练 (加入 Turnover 特征)
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
         feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover']
-        train = df[feats + ['Target']].dropna()
-        rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
-        rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
+        train_df = df[feats + ['Target']].dropna()
         
-        win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
+        if len(train_df) < 30: return None # 样本不足保护
+        
+        rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
+        rf.fit(train_df[feats].iloc[:-5].values, train_df['Target'].iloc[:-5].values)
+        
+        # 结果预测
+        last_row = df[feats].iloc[[-1]].values
+        win_p = float(rf.predict_proba(last_row)[0][1])
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         
-        # 4. 权重修正 (Pro版/单兵版)
+        # 4. Pro版/单兵版：权重增益
         north_val = "跳过"
         north_multiplier = 1.0
         if include_pro:
             north_val = get_north_flow(symbol_6digit)
-            if isinstance(north_val, float):
+            if isinstance(north_val, (int, float)):
                 if north_val > 500: north_multiplier = 1.15
                 elif north_val < -500: north_multiplier = 0.85
         
         score = win_p * ev * risk_weight * north_multiplier * 1000
         
-        # 5. 名字猎取逻辑修复
+        # 5. 名称获取修复
         curr_price = df['Close'].iloc[-1]
+        atr_now = df['ATR'].iloc[-1]
         snap_data = snapshot.get(symbol_6digit, {})
-        name = "未知"
-        if manual_name:
-            name = manual_name
-        elif snap_data.get('名称'):
-            name = snap_data.get('名称')
-        else:
+        
+        name = manual_name if manual_name else snap_data.get('名称')
+        if not name:
             try:
-                if ".SS" in ticker or ".SZ" in ticker:
-                    info_df = ak.stock_individual_info_em(symbol=symbol_6digit)
-                    name = info_df[info_df['item'] == '股票简称']['value'].values[0]
+                info_df = ak.stock_individual_info_em(symbol=symbol_6digit)
+                name = info_df[info_df['item'] == '股票简称']['value'].values[0]
             except Exception:
                 name = ticker
-        
-        real_turnover = snap_data.get('换手率', df['Turnover'].iloc[-1])
 
         return {
             '名称': name, '代码': ticker, '现价': round(curr_price, 2),
@@ -129,10 +126,12 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
             '周期': "5-10交易日", '建议买入': round(curr_price * 0.99, 2),
             '止盈参考': round(curr_price + (atr_now * 2.5), 2), 
             '止损建议': round(curr_price - (atr_now * 1.5), 2),
-            '换手率': f"{real_turnover:.2f}%", '北向资金(万)': north_val,
-            '综合评分': round(score, 2), 'Score_Raw': score 
+            '换手率': f"{snap_data.get('换手率', df['Turnover'].iloc[-1]):.2f}%", 
+            '北向资金(万)': north_val, '综合评分': round(score, 2), 'Score_Raw': score 
         }
-    except Exception:
+    except Exception as e:
+        # 后台记录错误但不崩溃
+        print(f"Error diagnosing {ticker}: {e}")
         return None
 
 # --- 4. 界面渲染 ---
@@ -151,23 +150,18 @@ def get_market_env():
     try:
         m_df = yf.download("000300.SS", period="60d", progress=False)
         if not m_df.empty:
-            if isinstance(m_df.columns, pd.MultiIndex):
-                m_df.columns = m_df.columns.get_level_values(0)
+            if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
             m_close = m_df['Close'].iloc[-1]
             m_ma20 = m_df['Close'].rolling(20).mean().iloc[-1]
             risk_weight = 1.2 if m_close > m_ma20 else 0.8
             st.markdown(f"""
-            <div class="env-card">
-                <div class="grid-3">
-                    <div class="stat-box"><small>沪深300</small><br><b>{m_close:.2f}</b></div>
-                    <div class="stat-box"><small>全球联动</small><br><b>监测中</b></div>
-                    <div class="stat-box"><small>风控乘数</small><br><b style="color:#ffd700;">x{risk_weight}</b></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            <div class="env-card"><div class="grid-3">
+                <div class="stat-box"><small>沪深300</small><br><b>{m_close:.2f}</b></div>
+                <div class="stat-box"><small>全球联动</small><br><b>监测中</b></div>
+                <div class="stat-box"><small>风控乘数</small><br><b style="color:#ffd700;">{risk_weight}</b></div>
+            </div></div>""", unsafe_allow_html=True)
             return risk_weight
-    except Exception:
-        pass
+    except Exception: pass
     return 0.8
 
 risk_weight = get_market_env()
@@ -177,7 +171,6 @@ DISPLAY_COLS = ['名称', '代码', '现价', '预测胜率', '期望值(EV)', '
 with tab1:
     mode = st.radio("选择扫描引擎", ["⚡ 极速轻量版 (Bias+RSI+Vol+Turnover)", "🧠 机器学习 Pro 版 (含北向资金权重修正)"], horizontal=True)
     if st.button("开始全量量化扫描"):
-        is_pro = "Pro" in mode
         snapshot = fetch_market_snapshot()
         try:
             df_300 = ak.index_stock_cons_csindex(symbol="000300")
@@ -191,28 +184,30 @@ with tab1:
         status_text = st.empty()
         for i, (t, n) in enumerate(pool.items()):
             status_text.text(f"正在扫描 ({i+1}/50): {n}...")
-            res = diagnostic_core(t, risk_weight, snapshot, include_pro=is_pro, manual_name=n)
-            if res:
-                results.append(res)
+            res = diagnostic_core(t, risk_weight, snapshot, include_pro=("Pro" in mode), manual_name=n)
+            if res: results.append(res)
             progress_bar.progress((i + 1) / len(pool))
         
-        status_text.success("扫描完成！")
+        status_text.empty()
         if results:
             df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(15)
             st.dataframe(df_final[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'), width='stretch')
+        else:
+            st.warning("⚠️ 扫描完成，但未发现符合量化评分标准的标的，请检查网络或尝试单兵诊断。")
 
 with tab2:
-    user_input = st.text_input("输入代码（单兵模式默认启用 Pro 引擎）", "600519.SS 300750.SZ 601318.SS")
+    user_input = st.text_input("输入代码（上限5个，示例：600519.SS 300750.SZ）", "600519.SS 300750.SZ 000001.SZ")
     if st.button("执行精准诊断"):
         snapshot = fetch_market_snapshot()
         tickers = user_input.replace(',', ' ').split()[:5]
         results = []
         for t in tickers:
-            with st.spinner(f"深度诊断 {t}..."):
+            with st.spinner(f"正在分析 {t}..."):
                 res = diagnostic_core(t, risk_weight, snapshot, include_pro=True)
-                if res:
-                    results.append(res)
+                if res: results.append(res)
         
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.dataframe(df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'), width='stretch')
+        else:
+            st.error("❌ 诊断失败：无法获取该标的历史行情，或该标的历史记录不足以支撑机器学习计算。")
