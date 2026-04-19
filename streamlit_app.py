@@ -115,8 +115,10 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False, manual_nam
             try:
                 if ".SS" in ticker or ".SZ" in ticker:
                     info_df = ak.stock_individual_info_em(symbol=symbol_6digit)
-                    name = info_df.iloc[0, 1]
-            except: name = ticker
+                    # 不再使用 iloc[0, 1]，改为匹配“股票简称”这一行
+                    name = info_df[info_df['item'] == '股票简称']['value'].values[0]
+                except:
+                    name = ticker # 实在拿不到才显示代码
         
         real_turnover = snap_data.get('换手率', df['Turnover'].iloc[-1])
 
