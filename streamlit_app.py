@@ -29,10 +29,10 @@ def get_v24_css():
 # --- 2. 高效数据增强函数 ---
 @st.cache_data(ttl=3600)
 def fetch_market_snapshot():
-    """一次性获取全市场实时快照，极大提升换手率获取速度"""
     try:
         df = ak.stock_zh_a_spot_em()
-        # 建立代码到(名称, 换手率)的映射
+        # 关键点：强制将代码转为字符串并去掉可能的前导零问题
+        df['代码'] = df['代码'].astype(str)
         return df.set_index('代码')[['名称', '换手率']].to_dict('index')
     except:
         return {}
@@ -50,8 +50,12 @@ def get_north_flow(symbol):
 # --- 3. 核心诊断逻辑 (含机器学习) ---
 def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False):
     try:
-        # 1. 基础行情下载 (yfinance)
-        time.sleep(0.2) # 基础避让
+        # --- 新增：代码清洗逻辑 ---
+        # 统一提取纯数字代码，用于匹配 akshare 数据
+        clean_symbol = ticker.split('.')[0] 
+        
+        # 1. 基础行情下载
+        time.sleep(0.2)
         df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
@@ -85,24 +89,36 @@ def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False):
         sl_price = curr_price - (atr_now * 1.5)
         
         # 5. 组装结果 (快照匹配)
-        symbol = ticker.split('.')[0]
-        name = snapshot.get(symbol, {}).get('名称', '未知')
-        turnover = snapshot.get(symbol, {}).get('换手率', 0.0)
+        stock_info = snapshot.get(clean_symbol, {})
+        name = stock_info.get('名称', '未知')
+        turnover = stock_info.get('换手率', 0.0)
         
         # Pro版扩展：北向资金
         north_val = "跳过"
         if include_pro:
-            north_val = get_north_flow(symbol)
+            # 只有 A 股才查北向资金，美股(如AAPL)跳过
+            if '.SS' in ticker or '.SZ' in ticker:
+                north_val = get_north_flow(clean_symbol) 
+            else:
+                north_val = "N/A"
 
         return {
-            '名称': name, '代码': ticker, '现价': round(curr_price, 2),
-            '预测胜率': f"{win_p:.1%}", '期望值(EV)': f"{ev*100:+.2f}%", 
-            '周期': "5-10交易日", '建议买入': round(curr_price * 0.99, 2),
-            '止盈参考': round(tp_price, 2), '止损建议': round(sl_price, 2),
-            '换手率': f"{turnover:.2f}%", '北向资金(万)': north_val,
-            '综合评分': round(score, 2), 'Score_Raw': score 
+            '名称': name, 
+            '代码': ticker, 
+            '现价': round(curr_price, 2),
+            '预测胜率': f"{win_p:.1%}", 
+            '期望值(EV)': f"{ev*100:+.2f}%", 
+            '周期': "5-10交易日", 
+            '建议买入': round(curr_price * 0.99, 2),
+            '止盈参考': round(tp_price, 2), 
+            '止损建议': round(sl_price, 2),
+            '换手率': f"{turnover:.2f}%", 
+            '北向资金(万)': north_val,
+            '综合评分': round(score, 2), 
+            'Score_Raw': score 
         }
-    except:
+    except Exception as e:
+        # 调试用：st.error(f"Error on {ticker}: {e}")
         return None
 
 # --- 4. 界面渲染 ---
