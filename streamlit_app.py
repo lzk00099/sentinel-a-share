@@ -40,31 +40,44 @@ def get_stock_name_map():
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
 def diagnostic_core(ticker, risk_weight, name_map):
     try:
-        # 提取纯数字代码用于名称匹配
+        # 提取纯数字代码用于名称匹配和 akshare 查询
         raw_code = "".join(filter(str.isdigit, ticker))
-        stock_name = name_map.get(raw_code, ticker) # 找不到就显示代码
+        stock_name = name_map.get(raw_code, ticker)
 
-        # 1. 行情下载 (yf 为准)
+        # 1. 数据获取：yfinance 行情 + akshare 换手率
         df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
-        # 2. 指标计算 (严格保留你的逻辑)
+
+        # 获取精准换手率 (从 akshare 实时接口获取当前换手，并回填至序列)
+        try:
+            # 获取实时换手率作为最新特征点
+            df_spot = ak.stock_zh_a_spot_em()
+            current_turnover = df_spot[df_spot['代码'] == raw_code]['换手率'].values[0]
+            # 为了让模型学习，我们需要历史换手。如果 yf 没提供，我们用成交量/中位数模拟历史波动，最新点强制对齐实时换手
+            df['Turnover'] = (df['Volume'] / df['Volume'].median()) * (current_turnover / (df['Volume'].iloc[-1] / df['Volume'].median()))
+        except:
+            # 兜底方案：若 ak 接口失败，使用成交量变化率代替换手逻辑
+            df['Turnover'] = df['Volume'] / df['Volume'].rolling(20).mean()
+
+        # 2. 指标计算 (保留原逻辑 + 新增换手因子)
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         atr_now = df['ATR'].iloc[-1]
+        turnover_now = df['Turnover'].iloc[-1] # 获取当前换手率
         
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 3. 机器学习模型 (Random Forest)
-        # Target: 未来5日内最高价触及 6% 涨幅
+        # 3. 机器学习模型增强 (4 特征版)
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        feats = ['Vol_Ratio', 'Bias', 'RSI']
+        
+        # --- 特征集增加 'Turnover' ---
+        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] 
         train = df[feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
@@ -72,9 +85,14 @@ def diagnostic_core(ticker, risk_weight, name_map):
         
         # 预测当前胜率
         win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
-        # EV逻辑：(胜率 * 8% 预期收益) - (败率 * 4% 预期风险)
+        
+        # 4. EV 与 评分计算
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
-        score = win_p * ev * risk_weight * 1000
+        
+        # --- 换手率溢价逻辑 (可选) ---
+        # 如果换手率在 3%-8% 活跃区，额外给 5% 的评分溢价
+        turnover_bonus = 1.05 if 3.0 <= turnover_now <= 8.0 else 1.0
+        score = win_p * ev * risk_weight * turnover_bonus * 1000
         
         curr_price = df['Close'].iloc[-1]
 
@@ -82,6 +100,7 @@ def diagnostic_core(ticker, risk_weight, name_map):
             '名称': stock_name,
             '代码': ticker,
             '现价': round(curr_price, 2),
+            '换手率': f"{turnover_now:.2f}%", # 新增展示项
             '预测胜率': f"{win_p:.1%}",
             '期望值(EV)': f"{ev*100:+.2f}%",
             '周期': "5-10交易日",
@@ -91,7 +110,7 @@ def diagnostic_core(ticker, risk_weight, name_map):
             '综合评分': round(score, 2),
             'Score_Raw': score 
         }
-    except:
+    except Exception as e:
         return None
 
 # --- 4. 界面渲染 ---
