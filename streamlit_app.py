@@ -38,79 +38,70 @@ def get_stock_name_map():
         return {}
 
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
-def diagnostic_core(ticker, risk_weight, name_map):
+# --- 修改后的核心诊断逻辑 ---
+def diagnostic_core(ticker, risk_weight, name_map, spot_data=None): # 增加 spot_data 参数
     try:
-        # 提取纯数字代码用于名称匹配和 akshare 查询
         raw_code = "".join(filter(str.isdigit, ticker))
         stock_name = name_map.get(raw_code, ticker)
 
-        # 1. 数据获取：yfinance 行情 + akshare 换手率
+        # 1. 行情下载 (yf 为准)
         df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-        # 获取精准换手率 (从 akshare 实时接口获取当前换手，并回填至序列)
-        try:
-            # 获取实时换手率作为最新特征点
-            df_spot = ak.stock_zh_a_spot_em()
-            current_turnover = df_spot[df_spot['代码'] == raw_code]['换手率'].values[0]
-            # 为了让模型学习，我们需要历史换手。如果 yf 没提供，我们用成交量/中位数模拟历史波动，最新点强制对齐实时换手
-            df['Turnover'] = (df['Volume'] / df['Volume'].median()) * (current_turnover / (df['Volume'].iloc[-1] / df['Volume'].median()))
-        except:
-            # 兜底方案：若 ak 接口失败，使用成交量变化率代替换手逻辑
+        # 2. 换手率获取：从传入的预载数据中快速检索
+        turnover_now = 0.0
+        if spot_data is not None:
+            try:
+                # 查表法：耗时从 1秒 降至 0.001秒
+                turnover_now = float(spot_data[spot_data['代码'] == raw_code]['换手率'].values[0])
+                df['Turnover'] = (df['Volume'] / df['Volume'].median()) * (turnover_now / (df['Volume'].iloc[-1] / df['Volume'].median()))
+            except:
+                df['Turnover'] = df['Volume'] / df['Volume'].rolling(20).mean()
+                turnover_now = df['Turnover'].iloc[-1]
+        else:
             df['Turnover'] = df['Volume'] / df['Volume'].rolling(20).mean()
+            turnover_now = df['Turnover'].iloc[-1]
 
-        # 2. 指标计算 (保留原逻辑 + 新增换手因子)
+        # 3. 指标计算 (保持原逻辑)
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         atr_now = df['ATR'].iloc[-1]
-        turnover_now = df['Turnover'].iloc[-1] # 获取当前换手率
         
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # 3. 机器学习模型增强 (4 特征版)
+        # 4. 机器学习模型 (4 特征版)
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        
-        # --- 特征集增加 'Turnover' ---
-        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] 
+        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] # 确认加入 Turnover
         train = df[feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        # 预测当前胜率
         win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
-        
-        # 4. EV 与 评分计算
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
         
-        # --- 换手率溢价逻辑 (可选) ---
-        # 如果换手率在 3%-8% 活跃区，额外给 5% 的评分溢价
-        turnover_bonus = 1.05 if 3.0 <= turnover_now <= 8.0 else 1.0
+        # 换手率溢价逻辑
+        turnover_bonus = 1.1 if 3.0 <= turnover_now <= 8.0 else 1.0
         score = win_p * ev * risk_weight * turnover_bonus * 1000
         
         curr_price = df['Close'].iloc[-1]
 
         return {
-            '名称': stock_name,
-            '代码': ticker,
-            '现价': round(curr_price, 2),
-            '换手率': f"{turnover_now:.2f}%", # 新增展示项
-            '预测胜率': f"{win_p:.1%}",
-            '期望值(EV)': f"{ev*100:+.2f}%",
-            '周期': "5-10交易日",
+            '名称': stock_name, '代码': ticker, '现价': round(curr_price, 2),
+            '换手率': f"{turnover_now:.2f}%", '预测胜率': f"{win_p:.1%}",
+            '期望值(EV)': f"{ev*100:+.2f}%", '周期': "5-10交易日",
             '建议买入': round(curr_price * 0.99, 2),
             '止盈参考': round(curr_price + (atr_now * 2.5), 2),
             '止损建议': round(curr_price - (atr_now * 1.5), 2),
-            '综合评分': round(score, 2),
-            'Score_Raw': score 
+            '综合评分': round(score, 2), 'Score_Raw': score 
         }
-    except Exception as e:
+    except:
         return None
 
 # --- 4. 界面渲染 ---
@@ -192,49 +183,59 @@ DISPLAY_COLS = ['名称', '代码', '现价', '预测胜率', '期望值(EV)', '
 
 with tab1:
     st.write("点击下方按钮，对沪深300指数所有成分股进行 Hybrid-RF 建模扫描。")
+    # 更新展示列
+    DISPLAY_COLS = ['名称', '代码', '现价', '换手率', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '综合评分']
+    
     if st.button("开始 300 蓝筹全量扫描"):
+        # --- 性能优化核心：全局快照 ---
+        status_msg = st.empty()
+        status_msg.info("正在获取全市场实时换手率快照...")
+        try:
+            global_spot = ak.stock_zh_a_spot_em()
+            status_msg.success("快照获取成功，开始建模...")
+        except:
+            global_spot = None
+            status_msg.warning("快照获取失败，将降级运行...")
+        
         try:
             df_300 = ak.index_stock_cons_csindex(symbol="000300")
-            # 格式化 yf 代码
-            pool = []
-            for code in df_300['成分券代码']:
-                yf_code = f"{code}.SS" if code.startswith('60') else f"{code}.SZ"
-                pool.append(yf_code)
+            pool = [f"{c}.SS" if c.startswith('60') else f"{c}.SZ" for c in df_300['成分券代码']]
         except:
-            pool = ["600519.SS", "300750.SZ"] # 兜底
+            pool = ["600519.SS", "300750.SZ"]
 
         results = []
         progress_bar = st.progress(0)
-        status_text = st.empty()
         
         for i, t in enumerate(pool):
-            status_text.text(f"正在分析 ({i+1}/300): {t}...")
-            res = diagnostic_core(t, risk_weight, name_map)
+            # 关键：将 global_spot 传给函数
+            res = diagnostic_core(t, risk_weight, name_map, spot_data=global_spot)
             if res: results.append(res)
             progress_bar.progress((i + 1) / len(pool))
         
-        status_text.success("全量扫描完成！")
+        status_msg.success("全量扫描完成！")
         if results:
             df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.subheader("🔥 SENTINEL 选股池 (高评分 Top 20)")
-            st.dataframe(
-                df_final[DISPLAY_COLS].head(20).style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
-                width='stretch'
-            )
+            st.dataframe(df_final[DISPLAY_COLS].head(20).style.background_gradient(subset=['综合评分'], cmap='RdYlGn'), width='stretch')
 
 with tab2:
     st.write("手动输入代码（支持 A股/美股/港股，上限5个）。")
     user_input = st.text_input("示例：601318.SS 000001.SZ NVDA 0700.HK", "600519.SS 300750.SZ 601318.SS")
     if st.button("执行单兵精准诊断"):
+        # 同样获取快照
+        try:
+            global_spot = ak.stock_zh_a_spot_em()
+        except:
+            global_spot = None
+            
         tickers = user_input.replace(',', ' ').split()[:5]
         results = []
         for t in tickers:
             with st.spinner(f"正在诊断 {t}..."):
-                res = diagnostic_core(t, risk_weight, name_map)
+                # 传入快照
+                res = diagnostic_core(t, risk_weight, name_map, spot_data=global_spot)
                 if res: results.append(res)
         
         if results:
             df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.dataframe(df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'), width='stretch')
-        else:
-            st.error("诊断失败，请检查输入代码是否符合 yfinance 格式。")
