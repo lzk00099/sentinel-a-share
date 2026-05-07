@@ -9,196 +9,189 @@ import time
 
 # --- 基础配置 ---
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="SENTINEL V26 - EV & ML DIAGNOSIS", layout="wide")
+st.set_page_config(page_title="SENTINEL A-Share V24 PRO", layout="wide")
 
-# --- 1. 样式表 ---
+# --- 1. CSS 渲染 (原封不动还原) ---
 def get_v24_css():
     return """
     <style>
-        .main-header { background: linear-gradient(135deg, #000000 0%, #1a3a5a 100%); color: #00d4ff; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 25px; border: 1px solid #00d4ff; }
-        .env-card { background: #0e1117; color: #ffffff; border: 1px solid #333; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
-        .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+        .main-header { background: linear-gradient(135deg, #1a1a1a 0%, #800000 100%); color: #ffd700; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 25px; border: 1px solid #ffd700; }
+        .env-card { background: #0e1117; color: #ffd700; border: 1px solid #333; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
         .stat-box { background: #1c1c1c; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #444; }
-        .sidebar-box { background: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #1a3a5a; margin-bottom: 15px; color: #333; }
+        .sidebar-box { background: #ffffff; padding: 15px; border-radius: 8px; border-left: 5px solid #cc0000; margin-bottom: 15px; color: #333; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .u-tips { font-size: 0.85rem; color: #666; line-height: 1.5; }
+        .stButton>button { width: 100%; border-radius: 8px; background: #800000; color: white; border: none; transition: 0.3s; }
+        .stButton>button:hover { background: #ffd700; color: #000; }
     </style>
     """
 
-# --- 2. 数据获取增强 ---
-@st.cache_data(ttl=600)
+# --- 2. 高效数据增强函数 ---
+@st.cache_data(ttl=3600)
 def fetch_market_snapshot():
-    """修复点：匹配最新的 akshare 字段名"""
+    """一次性获取全市场实时快照，极大提升换手率获取速度"""
     try:
         df = ak.stock_zh_a_spot_em()
-        # 建立 6 位代码到名称和换手率的映射
-        df['code_clean'] = df['代码'].astype(str).str.zfill(6)
-        return df.set_index('code_clean')[['名称', '换手率']].to_dict('index')
-    except Exception as e:
-        st.warning(f"行情快照获取失败: {e}")
+        # 建立代码到(名称, 换手率)的映射
+        return df.set_index('代码')[['名称', '换手率']].to_dict('index')
+    except:
         return {}
 
 def get_north_flow(symbol):
-    """个股北向资金流向"""
+    """Pro版专属：获取北向资金（慢速接口）"""
     try:
-        # 仅针对 A 股进行查询
-        df = ak.stock_hsgt_individual_em(symbol=symbol)
-        if not df.empty:
-            return round(df['当日净买入额'].iloc[0] / 10000, 2) # 万
+        hsgt_df = ak.stock_hsgt_individual_em(symbol=symbol)
+        if not hsgt_df.empty:
+            return round(hsgt_df['当日净买入额'].iloc[0] / 10000, 2)
     except:
         pass
     return 0.0
 
-# --- 3. 核心诊断模型 (Random Forest + EV) ---
-def diagnostic_engine(ticker, market_weight, snapshot, include_pro=True):
+# --- 3. 核心诊断逻辑 (含机器学习) ---
+def diagnostic_core(ticker, risk_weight, snapshot, include_pro=False):
     try:
-        # 1. 代码解析
-        clean_symbol = "".join(filter(str.isdigit, ticker))
-        
-        # 2. 下载数据 (包含计算 EV 所需的历史)
-        df = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
-        if df.empty or len(df) < 50: return None
+        # 1. 基础行情下载 (yfinance)
+        time.sleep(0.2) # 基础避让
+        df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
+        if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # 3. 特征工程
-        df['Returns'] = df['Close'].pct_change()
+        # 2. 指标计算
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
-        df['RSI'] = 100 - (100 / (1 + (df['Returns'].where(df['Returns'] > 0, 0).rolling(14).mean() / 
-                                     df['Returns'].where(df['Returns'] < 0, 0).abs().rolling(14).mean())))
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
+        df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
+        atr_now = df['ATR'].iloc[-1]
         
-        # 4. 随机森林预测 (Target: 5日内是否有 6% 的涨幅)
+        change = df['Close'].diff()
+        gain = (change.where(change > 0, 0)).rolling(14).mean()
+        loss = (-change.where(change < 0, 0)).rolling(14).mean()
+        df['RSI'] = 100 - (100 / (1 + gain/loss))
+        
+        # 3. 机器学习模型 (Random Forest)
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        features = ['Vol_Ratio', 'RSI', 'Bias']
-        data = df[features + ['Target']].dropna()
+        feats = ['Vol_Ratio', 'Bias', 'RSI']
+        train = df[feats + ['Target']].dropna()
+        rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42) # 适度降低树数量提速
+        rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        X = data[features].iloc[:-5]
-        y = data['Target'].iloc[:-5]
+        win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
+        ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
+        score = win_p * ev * risk_weight * 1000
         
-        model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-        model.fit(X, y)
-        
-        # 预测当前胜率
-        curr_feat = df[features].iloc[[-1]].values
-        win_prob = float(model.predict_proba(curr_feat)[0][1])
-        
-        # 5. EV (期望值) 计算
-        # EV = (胜率 * 预期收益) + (败率 * 预期亏损)
-        avg_gain = 0.07  # 设定目标盈利 7%
-        avg_loss = -0.04 # 设定止损 4%
-        ev = (win_prob * avg_gain) + ((1 - win_prob) * avg_loss)
-        
-        # 6. 价格逻辑 (ATR 辅助)
-        atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+        # 4. 价格建议
         curr_price = df['Close'].iloc[-1]
+        tp_price = curr_price + (atr_now * 2.5)
+        sl_price = curr_price - (atr_now * 1.5)
         
-        # 7. 匹配快照数据 (解决“未知”名称问题)
-        stock_meta = snapshot.get(clean_symbol, {})
-        name = stock_meta.get('名称', '海外标的/指数')
-        turnover = stock_meta.get('换手率', 0.0)
+        # 5. 组装结果 (快照匹配)
+        symbol = ticker.split('.')[0]
+        name = snapshot.get(symbol, {}).get('名称', '未知')
+        turnover = snapshot.get(symbol, {}).get('换手率', 0.0)
         
-        north_val = get_north_flow(clean_symbol) if ('.SS' in ticker or '.SZ' in ticker) else "N/A"
+        # Pro版扩展：北向资金
+        north_val = "跳过"
+        if include_pro:
+            north_val = get_north_flow(symbol)
 
         return {
-            '名称': name,
-            '代码': ticker,
-            '现价': round(curr_price, 2),
-            '预测胜率': f"{win_prob:.1%}",
-            '期望值(EV)': f"{ev*100:+.2f}%",
-            '周期': "5-8 交易日",
-            '建议买入': round(curr_price * 0.995, 2),
-            '止盈参考': round(curr_price + (atr * 2.2), 2),
-            '止损建议': round(curr_price - (atr * 1.5), 2),
-            '换手率': f"{turnover:.2f}%",
-            '北向流入(万)': north_val,
-            '综合评分': round(win_prob * ev * market_weight * 1000, 2)
+            '名称': name, '代码': ticker, '现价': round(curr_price, 2),
+            '预测胜率': f"{win_p:.1%}", '期望值(EV)': f"{ev*100:+.2f}%", 
+            '周期': "5-10交易日", '建议买入': round(curr_price * 0.99, 2),
+            '止盈参考': round(tp_price, 2), '止损建议': round(sl_price, 2),
+            '换手率': f"{turnover:.2f}%", '北向资金(万)': north_val,
+            '综合评分': round(score, 2), 'Score_Raw': score 
         }
     except:
         return None
 
-# --- 4. 界面与市场评分 ---
+# --- 4. 界面渲染 ---
 st.markdown(get_v24_css(), unsafe_allow_html=True)
-st.markdown('<div class="main-header"><h1>🛡️ SENTINEL V26 PRO</h1><p>Expected Value + Random Forest Multi-Market Diagnosis</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24 PRO</h1><p>全市场量化扫描系统 • 2026 性能优化版</p></div>', unsafe_allow_html=True)
 
-@st.cache_data(ttl=1800)
-def calculate_market_score():
-    """综合评估 QQQ, IWM, SPY 和 沪深300"""
-    indices = {"沪深300": "000300.SS", "NASDAQ (QQQ)": "QQQ", "S&P500 (SPY)": "SPY", "Russell 2000 (IWM)": "IWM"}
-    scores = {}
-    total_weight = 1.0
-    
-    try:
-        data = yf.download(list(indices.values()), period="20d", progress=False)['Close']
-        for label, ticker in indices.items():
-            current = data[ticker].iloc[-1]
-            ma20 = data[ticker].mean()
-            change = (current - data[ticker].iloc[-2]) / data[ticker].iloc[-2]
-            scores[label] = {"val": current, "trend": "UP" if current > ma20 else "DOWN", "chg": change}
-        
-        # 如果大盘都在 MA20 上方，风控系数增加
-        up_count = sum(1 for v in scores.values() if v['trend'] == "UP")
-        total_weight = 0.7 + (up_count * 0.15)
-    except:
-        pass
-    return total_weight, scores
+# 侧边栏：完整还原
+with st.sidebar:
+    st.markdown("### 🧬 系统逻辑简介")
+    st.markdown('<div class="sidebar-box">本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型，专为 A 股 T+1 环境定制。<br><br><b>核心因子：</b><li><b>Bias (量价乖离):</b> 监控价格回归动能。</li><li><b>RSI (强弱对比):</b> 评估超买超卖极端情绪。</li><li><b>Vol_Ratio (量能修正):</b> 过滤无量假拉升。</li><li><b>ATR (动态波幅):</b> 自动适配震荡空间。</div>', unsafe_allow_html=True)
+    st.markdown("### 🕒 最佳运行时间")
+    st.markdown('<div class="sidebar-box"><b>1. 盘前 (09:15):</b> 定调。<br><b>2. 盘中 (14:00):</b> 捕捉趋势。<br><b>3. 尾盘 (14:45):</b> 锁定期望值。</div>', unsafe_allow_html=True)
+    st.markdown("### 🛠️ 操作手册")
+    st.markdown('<div class="u-tips"><li><b>评分 > 10:</b> 强信号。</li><li><b>评分 5-10:</b> 观察。</li><li><b>评分 < 0:</b> 避险区域。</li><br><i>*止盈止损根据个股 ATR 动态调整。</i></div>', unsafe_allow_html=True)
 
-m_weight, m_details = calculate_market_score()
+# 顶部大盘环境
+def get_market_env():
+    m_df = yf.download("000300.SS", period="60d", progress=False)
+    global_df = yf.download(["QQQ", "SPY", "IWM"], period="5d", progress=False)['Close']
+    if not m_df.empty:
+        if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
+        m_close = m_df['Close'].iloc[-1]
+        m_ma20 = m_df['Close'].rolling(20).mean().iloc[-1]
+        risk_weight = 1.2 if m_close > m_ma20 else 0.8
+        st.markdown(f"""
+        <div class="env-card">
+            <div class="grid-3">
+                <div class="stat-box"><small>沪深300</small><br><b>{m_close:.2f}</b></div>
+                <div class="stat-box"><small>全球联动</small><br><b>监测中</b></div>
+                <div class="stat-box"><small>风控乘数</small><br><b style="color:#ffd700;">x{risk_weight}</b></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return risk_weight
+    return 0.8
 
-# 显示大盘看板
-cols = st.columns(4)
-for i, (k, v) in enumerate(m_details.items()):
-    color = "#00ff88" if v['trend'] == "UP" else "#ff4b4b"
-    cols[i].markdown(f"""
-    <div class="stat-box">
-        <small>{k}</small><br>
-        <b style="color:{color}; font-size:1.2rem;">{v['trend']}</b><br>
-        <small>{v['chg']:.2%}</small>
-    </div>
-    """, unsafe_allow_html=True)
+risk_weight = get_market_env()
 
-# --- 5. 交互诊断区域 ---
-tab1, tab2 = st.tabs(["🔍 手动单兵诊断 (Max 5)", "📡 核心资产扫描"])
+# 功能标签页
+tab1, tab2 = st.tabs(["🚀 核心资产 Top 50 扫描", "🔍 跨市场标的单兵诊断"])
+DISPLAY_COLS = ['名称', '代码', '现价', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '换手率', '北向资金(万)', '综合评分']
 
 with tab1:
-    user_input = st.text_input("输入股票代码 (空格分隔):", "600519.SS 300750.SZ AAPL NVDA 000001.SZ")
-    if st.button("开始深度诊断"):
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        mode = st.radio("选择扫描引擎", ["⚡ 极速轻量版 (核心系数 + ML)", "🧠 机器学习 Pro 版 (含北向资金深度扫描)"], horizontal=True)
+    
+    if st.button("开始全量量化扫描"):
+        is_pro = "Pro" in mode
+        snapshot = fetch_market_snapshot()
+        
+        try:
+            df_300 = ak.index_stock_cons_csindex(symbol="000300")
+            pool = { (f"{row['成分券代码']}.SS" if row['成分券代码'].startswith('60') else f"{row['成分券代码']}.SZ"): row['成分券名称']
+                    for _, row in df_300.head(50).iterrows() }
+        except:
+            pool = {"600519.SS": "贵州茅台", "300750.SZ": "宁德时代"}
+            
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, (t, n) in enumerate(pool.items()):
+            status_text.text(f"正在扫描 ({i+1}/50): {n}...")
+            res = diagnostic_core(t, risk_weight, snapshot, include_pro=is_pro)
+            if res: results.append(res)
+            progress_bar.progress((i + 1) / len(pool))
+        
+        status_text.success("扫描完成！")
+        if results:
+            df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False).head(15)
+            st.subheader("🔥 SENTINEL 选股池 (高期望值标的)")
+            st.dataframe(
+                df_final[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'),
+                width='stretch'
+            )
+
+with tab2:
+    st.write("输入代码（上限5个），手动诊断模式默认开启 Pro 引擎（含北向资金）。")
+    user_input = st.text_input("示例：600519.SS 300750.SZ AAPL", "600519.SS 300750.SZ 601318.SS")
+    if st.button("执行精准诊断"):
         snapshot = fetch_market_snapshot()
         tickers = user_input.replace(',', ' ').split()[:5]
-        
         results = []
         for t in tickers:
-            with st.spinner(f"分析中: {t}..."):
-                res = diagnostic_engine(t, m_weight, snapshot)
+            with st.spinner(f"深度诊断 {t}..."):
+                res = diagnostic_core(t, risk_weight, snapshot, include_pro=True)
                 if res: results.append(res)
         
         if results:
-            st.table(pd.DataFrame(results))
-        else:
-            st.error("未获取到有效数据，请检查代码格式（A股需后缀 .SS 或 .SZ）。")
-
-with tab2:
-    if st.button("启动核心资产 Top 20 扫描"):
-        snapshot = fetch_market_snapshot()
-        # 默认核心池
-        core_pool = ["600519.SS", "300750.SZ", "601318.SS", "000858.SZ", "600036.SS", "600900.SS", "002594.SZ", "300059.SZ"]
-        
-        scan_results = []
-        bar = st.progress(0)
-        for i, t in enumerate(core_pool):
-            res = diagnostic_engine(t, m_weight, snapshot)
-            if res: scan_results.append(res)
-            bar.progress((i + 1) / len(core_pool))
-        
-        if scan_results:
-            df_scan = pd.DataFrame(scan_results).sort_values('综合评分', ascending=False)
-            st.dataframe(df_scan.style.background_gradient(subset=['综合评分'], cmap='RdYlGn'))
-
-with st.sidebar:
-    st.markdown(f"### 🛡️ 风控系数: **{m_weight:.2f}**")
-    st.info("该系数基于 QQQ, IWM, SPY 与 HS300 的均线位置计算。")
-    st.write("---")
-    st.markdown("""
-    **模型说明：**
-    1. **EV (Expected Value)**: 基于历史波动计算的每笔交易预期盈亏。
-    2. **Random Forest**: 通过成交量比率、RSI和乖离率预测未来5日的潜在爆发力。
-    3. **ATR Stop**: 自动根据波动率锁定止损。
-    """)
+            df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
+            st.dataframe(df_user[DISPLAY_COLS].style.background_gradient(subset=['综合评分'], cmap='RdYlGn'), width='stretch')
