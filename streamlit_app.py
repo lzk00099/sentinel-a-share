@@ -100,12 +100,45 @@ st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-Share V24 PRO</h1><
 
 # 侧边栏：使用手册与逻辑
 with st.sidebar:
-    st.markdown("### 🧬 系统逻辑简介")
-    st.markdown('<div class="sidebar-box">本系统核心为 <b>Hybrid-RF (混合随机森林)</b> 模型。<br><br><b>核心因子：</b><li><b>Bias:</b> 监控价格回归动能。</li><li><b>RSI:</b> 评估强弱对比。</li><li><b>Vol_Ratio:</b> 过滤无量假拉升。</li><li><b>ATR:</b> 自动适配震荡空间。</div>', unsafe_allow_html=True)
-    st.markdown("### 🕒 最佳运行时间")
-    st.markdown('<div class="sidebar-box"><b>1. 盘前:</b> 趋势定调。<br><b>2. 盘中:</b> 动能监控。<br><b>3. 尾盘:</b> 锁定期望值。</div>', unsafe_allow_html=True)
-    st.markdown("### 🛠️ 操作手册")
-    st.markdown('<div class="u-tips"><li>评分 > 10 为强信号。</li><li>止盈止损采用动态 ATR 逻辑。</li><li>全量扫描针对沪深300指数全样本。</li></div>', unsafe_allow_html=True)
+    st.markdown("### 🧬 Sentinel 核心逻辑")
+    st.markdown(f"""
+    <div class="sidebar-box">
+        本系统采用 <b>Hybrid-RF (混合随机森林)</b> 与 <b>EV (期望值)</b> 双引擎驱动，专为 A 股 T+1 交易环境优化。
+        <br><br>
+        <b>核心模型因子：</b>
+        <li><b>Bias (量价乖离):</b> 捕捉均线回归的超跌或突破动能。</li>
+        <li><b>RSI (强弱对比):</b> 评估个股在当前波段的博弈强度。</li>
+        <li><b>Vol_Ratio (量能修正):</b> 识别真假突破，过滤缩量诱多。</li>
+        <li><b>ATR (动态空间):</b> 自动计算个股波动的“容错余量”。</li>
+        <br>
+        <b>当前策略：</b>基于沪深 300 MA20 的动态风控。
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🕒 最佳运行时间 (2026 版)")
+    st.markdown("""
+    <div class="sidebar-box">
+        <b>1. 盘初 (09:35):</b> <b>黄金进场点</b>。避开 9:30 前 5 分钟的无序波动，此时模型评分最接近真实动能。
+        <br><br>
+        <b>2. 盘中 (14:00):</b> 趋势确认。观察早盘高分股是否维持强度。
+        <br><br>
+        <b>3. 尾盘 (14:45):</b> 锁定期望值。确认日线级别信号，防范 T+1 次日波动风险。
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🛠️ 2026 避险/获利手册")
+    st.markdown("""
+    <div class="u-tips">
+        <li><b>强信号 (Score > 10):</b> 胜率与 EV 共振，属于“大概率+高回报”区域。</li>
+        <li><b>风控乘数 (x1.2):</b> 当大盘站稳 MA20，评分会系数放大，此时可适度增加仓位。</li>
+        <li><b>二段止盈:</b> 触及 EV 预设的 8% 收益建议减仓一半，余下仓位参考 ATR 动态止盈。</li>
+        <li><b>分散纪律:</b> 高分股成批出现时，同行业标的不建议超过 2 只，严防行业性回撤。</li>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if st.button("🧹 清理缓存并重置环境"):
+        st.cache_data.clear()
+        st.rerun()
 
 # 大盘环境诊断 (仅限大陆股指)
 def get_market_env():
