@@ -39,22 +39,29 @@ def get_stock_name_map():
 
 # --- 2. 动态换手率快照 (建议缓存 60-300 秒) ---
 @st.cache_data(ttl=60) 
-def get_turnover_snapshot():
-    try:
-        # 这个接口极其高效，一次返回所有 A 股
-        df_spot = ak.stock_zh_a_spot_em()
-        
-        # 核心改进：
-        # 1. 确保代码是字符串格式 (如 '600519')
-        # 2. 过滤掉换手率为非数字的情况
-        df_spot['代码'] = df_spot['代码'].astype(str)
-        df_spot['换手率'] = pd.to_numeric(df_spot['换手率'], errors='coerce').fillna(0.0)
-        
-        return dict(zip(df_spot['代码'], df_spot['换手率']))
-    except Exception as e:
-        # 这里用 warning 而不是 error，避免阻塞主流程
-        st.warning(f"⚠️ 实时换手率获取延迟: {e}")
-        return {}
+def get_turnover_snapshot_with_retry(retries=3, delay=2):
+    """
+    带重试逻辑的换手率获取
+    retries: 最大重试次数
+    delay: 失败后等待的秒数
+    """
+    for i in range(retries):
+        try:
+            # 尝试获取
+            df_spot = ak.stock_zh_a_spot_em()
+            
+            if not df_spot.empty:
+                df_spot['代码'] = df_spot['代码'].astype(str)
+                df_spot['换手率'] = pd.to_numeric(df_spot['换手率'], errors='coerce').fillna(0.0)
+                return dict(zip(df_spot['代码'], df_spot['换手率']))
+        except Exception as e:
+            if i < retries - 1:
+                # 失败了，休息一下再试
+                time.sleep(delay * (i + 1)) # 指数级退避
+                continue
+            else:
+                st.warning(f"⚠️ 换手率接口在 {retries} 次尝试后均失败，模型将跳过此因子。")
+    return {}
 
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
 def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
