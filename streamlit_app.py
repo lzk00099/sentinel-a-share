@@ -27,26 +27,33 @@ def get_v24_css():
     """
 
 # --- 2. 增强型名称映射器 ---
+# --- 1. 静态名称映射 (24小时更新一次即可) ---
 @st.cache_data(ttl=86400)
 def get_stock_name_map():
-    """获取沪深300成分股代码与名称的映射，确保名称显示正确"""
     try:
         df_300 = ak.index_stock_cons_csindex(symbol="000300")
-        # 建立 {'600519': '贵州茅台'} 这种映射
-        return dict(zip(df_300['成分券代码'], df_300['成分券名称']))
-    except:
+        # 强制转为字符串，防止匹配失败
+        return dict(zip(df_300['成分券代码'].astype(str), df_300['成分券名称']))
+    except Exception:
         return {}
+
+# --- 2. 动态换手率快照 (建议缓存 60-300 秒) ---
+@st.cache_data(ttl=60) 
 def get_turnover_snapshot():
-    """一次性获取全 A 股换手率映射表"""
     try:
-        # 获取实时行情快照（包含换手率）
+        # 这个接口极其高效，一次返回所有 A 股
         df_spot = ak.stock_zh_a_spot_em()
-        # 提取代码和换手率（百分比数值）
-        # 代码列通常是 '代码'，换手率是 '换手率'
-        turnover_map = dict(zip(df_spot['代码'], df_spot['换手率']))
-        return turnover_map
+        
+        # 核心改进：
+        # 1. 确保代码是字符串格式 (如 '600519')
+        # 2. 过滤掉换手率为非数字的情况
+        df_spot['代码'] = df_spot['代码'].astype(str)
+        df_spot['换手率'] = pd.to_numeric(df_spot['换手率'], errors='coerce').fillna(0.0)
+        
+        return dict(zip(df_spot['代码'], df_spot['换手率']))
     except Exception as e:
-        st.error(f"换手率数据获取失败: {e}")
+        # 这里用 warning 而不是 error，避免阻塞主流程
+        st.warning(f"⚠️ 实时换手率获取延迟: {e}")
         return {}
 
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
