@@ -38,51 +38,42 @@ def get_stock_name_map():
         return {}
 
 # --- 2. 动态换手率快照 (建议缓存 60-300 秒) ---
-@st.cache_data(ttl=60) 
-def get_turnover_snapshot_with_retry(retries=3, delay=2):
-    """
-    带重试逻辑的换手率获取
-    retries: 最大重试次数
-    delay: 失败后等待的秒数
-    """
+@st.cache_data(ttl=300) # 建议缓存 5 分钟，避免频繁请求被封
+def get_turnover_snapshot(retries=3, delay=2):
     for i in range(retries):
         try:
-            # 尝试获取
             df_spot = ak.stock_zh_a_spot_em()
-            
             if not df_spot.empty:
                 df_spot['代码'] = df_spot['代码'].astype(str)
                 df_spot['换手率'] = pd.to_numeric(df_spot['换手率'], errors='coerce').fillna(0.0)
                 return dict(zip(df_spot['代码'], df_spot['换手率']))
-        except Exception as e:
+        except Exception:
             if i < retries - 1:
-                # 失败了，休息一下再试
-                time.sleep(delay * (i + 1)) # 指数级退避
+                time.sleep(delay)
                 continue
-            else:
-                st.warning(f"⚠️ 换手率接口在 {retries} 次尝试后均失败，模型将跳过此因子。")
     return {}
 
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
 def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
     try:
+        # 1. 识别代码格式
+        is_a_share = ticker.endswith(('.SS', '.SZ'))
         raw_code = "".join(filter(str.isdigit, ticker))
         stock_name = name_map.get(raw_code, ticker)
         
-        # 从映射表中获取换手率，默认给个均值或0
-        curr_turnover = turnover_map.get(raw_code, 0.0)
+        # 2. 获取换手率 (非A股赋予中性值 1.5，避免模型偏见)
+        curr_turnover = turnover_map.get(raw_code, 1.5) if is_a_share else 1.5
 
+        # 3. 下载数据
         df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-        # --- 特征工程增强 ---
+        # 4. 指标计算
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        
-        # 将静态换手率引入序列（假设近期换手率保持该水平进行拟合，或仅作为即时因子）
         df['Turnover'] = curr_turnover 
         
         change = df['Close'].diff()
@@ -90,36 +81,42 @@ def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
 
-        # --- 随机森林模型更新 ---
+        # 5. 机器学习
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        
-        # 加入 Turnover 特征
         feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] 
         train = df[feats + ['Target']].dropna()
+        
+        if len(train) < 20: return None # 数据太少无法训练
         
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        # 预测
-        last_feat = df[feats].iloc[[-1]].values
-        win_p = float(rf.predict_proba(last_feat)[0][1])
+        win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
         
-        # ... 保持之前的 EV 和 Score 计算逻辑 ...
+        # 6. EV 与 综合评分 (加入了换手率活跃度修正)
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
-        score = win_p * ev * risk_weight * 1000
+        # 活跃度因子：换手率在 2%-10% 之间表现最佳，过低或过高减分
+        activity_multiplier = 1.2 if 2.0 < curr_turnover < 10.0 else 0.8
+        score = win_p * ev * risk_weight * activity_multiplier * 1000
         
+        curr_price = df['Close'].iloc[-1]
+        atr_now = df['ATR'].iloc[-1]
+
         return {
             '名称': stock_name,
             '代码': ticker,
-            '现价': round(df['Close'].iloc[-1], 2),
-            '换手率%': curr_turnover, # 增加显示
+            '现价': round(curr_price, 2),
+            '换手率%': curr_turnover,
             '预测胜率': f"{win_p:.1%}",
             '期望值(EV)': f"{ev*100:+.2f}%",
+            '周期': "5-10交易日",
+            '建议买入': round(curr_price * 0.99, 2),
+            '止盈参考': round(curr_price + (atr_now * 2.5), 2),
+            '止损建议': round(curr_price - (atr_now * 1.5), 2),
             '综合评分': round(score, 2),
-            'Score_Raw': score,
-            # ... 其他字段保持不变 ...
+            'Score_Raw': score 
         }
-    except:
+    except Exception as e:
         return None
 
 # --- 4. 界面渲染 ---
