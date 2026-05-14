@@ -27,86 +27,61 @@ def get_v24_css():
     """
 
 # --- 2. 增强型名称映射器 ---
-# --- 1. 静态名称映射 (24小时更新一次即可) ---
 @st.cache_data(ttl=86400)
 def get_stock_name_map():
+    """获取沪深300成分股代码与名称的映射，确保名称显示正确"""
     try:
         df_300 = ak.index_stock_cons_csindex(symbol="000300")
-        # 强制转为字符串，防止匹配失败
-        return dict(zip(df_300['成分券代码'].astype(str), df_300['成分券名称']))
-    except Exception:
+        # 建立 {'600519': '贵州茅台'} 这种映射
+        return dict(zip(df_300['成分券代码'], df_300['成分券名称']))
+    except:
         return {}
 
-# --- 2. 动态换手率快照 (建议缓存 60-300 秒) ---
-@st.cache_data(ttl=300) # 建议缓存 5 分钟，避免频繁请求被封
-def get_turnover_snapshot(retries=3, delay=2):
-    for i in range(retries):
-        try:
-            df_spot = ak.stock_zh_a_spot_em()
-            if not df_spot.empty:
-                df_spot['代码'] = df_spot['代码'].astype(str)
-                df_spot['换手率'] = pd.to_numeric(df_spot['换手率'], errors='coerce').fillna(0.0)
-                return dict(zip(df_spot['代码'], df_spot['换手率']))
-        except Exception:
-            if i < retries - 1:
-                time.sleep(delay)
-                continue
-    return {}
-
 # --- 3. 核心诊断逻辑 (Hybrid-RF) ---
-def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
+def diagnostic_core(ticker, risk_weight, name_map):
     try:
-        # 1. 识别代码格式
-        is_a_share = ticker.endswith(('.SS', '.SZ'))
+        # 提取纯数字代码用于名称匹配
         raw_code = "".join(filter(str.isdigit, ticker))
-        stock_name = name_map.get(raw_code, ticker)
-        
-        # 2. 获取换手率 (非A股赋予中性值 1.5，避免模型偏见)
-        curr_turnover = turnover_map.get(raw_code, 1.5) if is_a_share else 1.5
+        stock_name = name_map.get(raw_code, ticker) # 找不到就显示代码
 
-        # 3. 下载数据
+        # 1. 行情下载 (yf 为准)
         df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-
-        # 4. 指标计算
+        
+        # 2. 指标计算 (严格保留你的逻辑)
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        df['Turnover'] = curr_turnover 
+        atr_now = df['ATR'].iloc[-1]
         
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
-
-        # 5. 机器学习
-        df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover'] 
-        train = df[feats + ['Target']].dropna()
         
-        if len(train) < 20: return None # 数据太少无法训练
+        # 3. 机器学习模型 (Random Forest)
+        # Target: 未来5日内最高价触及 6% 涨幅
+        df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
+        feats = ['Vol_Ratio', 'Bias', 'RSI']
+        train = df[feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
+        # 预测当前胜率
         win_p = float(rf.predict_proba(df[feats].iloc[[-1]].values)[0][1])
-        
-        # 6. EV 与 综合评分 (加入了换手率活跃度修正)
+        # EV逻辑：(胜率 * 8% 预期收益) - (败率 * 4% 预期风险)
         ev = (win_p * 0.08) - ((1 - win_p) * 0.04)
-        # 活跃度因子：换手率在 2%-10% 之间表现最佳，过低或过高减分
-        activity_multiplier = 1.2 if 2.0 < curr_turnover < 10.0 else 0.8
-        score = win_p * ev * risk_weight * activity_multiplier * 1000
+        score = win_p * ev * risk_weight * 1000
         
         curr_price = df['Close'].iloc[-1]
-        atr_now = df['ATR'].iloc[-1]
 
         return {
             '名称': stock_name,
             '代码': ticker,
             '现价': round(curr_price, 2),
-            '换手率%': (curr_turnover, 2),
             '预测胜率': f"{win_p:.1%}",
             '期望值(EV)': f"{ev*100:+.2f}%",
             '周期': "5-10交易日",
@@ -116,7 +91,7 @@ def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
             '综合评分': round(score, 2),
             'Score_Raw': score 
         }
-    except Exception as e:
+    except:
         return None
 
 # --- 4. 界面渲染 ---
@@ -191,11 +166,10 @@ def get_market_env():
 
 risk_weight = get_market_env()
 name_map = get_stock_name_map()
-turnover_map = get_turnover_snapshot()
 
 # 页面主要功能
 tab1, tab2 = st.tabs(["🚀 沪深300 全量扫描", "🔍 跨市场单兵诊断"])
-DISPLAY_COLS = ['名称', '代码', '现价', '换手率%', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '综合评分']
+DISPLAY_COLS = ['名称', '代码', '现价', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '综合评分']
 
 with tab1:
     st.write("点击下方按钮，对沪深300指数所有成分股进行 Hybrid-RF 建模扫描。")
@@ -216,7 +190,7 @@ with tab1:
         
         for i, t in enumerate(pool):
             status_text.text(f"正在分析 ({i+1}/300): {t}...")
-            res = diagnostic_core(t, risk_weight, name_map, turnover_map)
+            res = diagnostic_core(t, risk_weight, name_map)
             if res: results.append(res)
             progress_bar.progress((i + 1) / len(pool))
         
@@ -237,7 +211,7 @@ with tab2:
         results = []
         for t in tickers:
             with st.spinner(f"正在诊断 {t}..."):
-                res = diagnostic_core(t, risk_weight, name_map, turnover_map)
+                res = diagnostic_core(t, risk_weight, name_map)
                 if res: results.append(res)
         
         if results:
