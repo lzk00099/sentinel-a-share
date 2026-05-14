@@ -45,25 +45,7 @@ def diagnostic_core(ticker, risk_weight, name_map):
         stock_name = name_map.get(raw_code, ticker) # 找不到就显示代码
 
         # 1. 行情下载 (yf 为准)
-        try:
-    # 提取纯数字代码 (如 600519)
-            raw_code = "".join(filter(str.isdigit, ticker))
-    
-    # 1. 获取包含换手率的历史数据 (akshare 默认从腾讯/新浪抓取)
-            df_ak = ak.stock_zh_a_hist(symbol=raw_code, period="daily", adjust="qfq")
-            if df_ak.empty: return None
-    
-    # 2. 统一字段名映射 (将 akshare 的中文名转为模型通用的英文名)
-            df = df_ak.rename(columns={
-                "日期": "Date", "开盘": "Open", "收盘": "Close", 
-                "最高": "High", "最低": "Low", "成交量": "Volume",
-                "换手率": "Turnover"  # 核心：获取换手率
-            })
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-            df = df.tail(250) # 保持 250 日观察期
-        except:
-            return None
+        df = yf.download(ticker, period="250d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
@@ -72,8 +54,6 @@ def diagnostic_core(ticker, risk_weight, name_map):
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        df['Turnover_MA5'] = df['Turnover'].rolling(5).mean()
-        df['Turnover_Ratio'] = df['Turnover'] / df['Turnover_MA5']
         atr_now = df['ATR'].iloc[-1]
         
         change = df['Close'].diff()
@@ -84,7 +64,7 @@ def diagnostic_core(ticker, risk_weight, name_map):
         # 3. 机器学习模型 (Random Forest)
         # Target: 未来5日内最高价触及 6% 涨幅
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] * 1.06).astype(int)
-        feats = ['Vol_Ratio', 'Bias', 'RSI', 'Turnover_Ratio']
+        feats = ['Vol_Ratio', 'Bias', 'RSI']
         train = df[feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42)
