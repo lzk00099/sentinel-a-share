@@ -106,7 +106,7 @@ def diagnostic_core(ticker, risk_weight, name_map, turnover_map):
             '名称': stock_name,
             '代码': ticker,
             '现价': round(curr_price, 2),
-            '换手率%': curr_turnover,
+            '换手率%': (curr_turnover, 2),
             '预测胜率': f"{win_p:.1%}",
             '期望值(EV)': f"{ev*100:+.2f}%",
             '周期': "5-10交易日",
@@ -195,7 +195,7 @@ turnover_map = get_turnover_snapshot()
 
 # 页面主要功能
 tab1, tab2 = st.tabs(["🚀 沪深300 全量扫描", "🔍 跨市场单兵诊断"])
-DISPLAY_COLS = ['名称', '代码', '现价', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '综合评分']
+DISPLAY_COLS = ['名称', '代码', '现价', '换手率%', '预测胜率', '期望值(EV)', '周期', '建议买入', '止盈参考', '止损建议', '综合评分']
 
 with tab1:
     st.write("点击下方按钮，对沪深300指数所有成分股进行 Hybrid-RF 建模扫描。")
