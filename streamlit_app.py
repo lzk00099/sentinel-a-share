@@ -308,7 +308,7 @@ with st.sidebar:
 market_env = get_mainland_market_env()
 name_map = get_stock_name_map()
 
-tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)"])
+tab1, tab2, tab3 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)", "📖 算法引擎实战手册"])
 
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
