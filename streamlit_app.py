@@ -239,7 +239,7 @@ def get_mainland_market_env():
     # 渲染 A 股专属宏观看板
     st.markdown(f"""
     <div class="env-card">
-        <h4 style='margin-top:0; color:#ffd700;'>🇨🇳 SENTINEL 境内多维宏观环境风控墙 (2026 纯血版)</h4>
+        <h4 style='margin-top:0; color:#ffd700;'>🇨🇳 SENTINEL 境内多维宏观环境风控墙 (2026版)</h4>
         <div class="grid-4">
             <div class="stat-box"><small>沪深300</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('沪深300 (核心资产)','数据维护中')}</b></div>
             <div class="stat-box"><small>上证指数</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('上证指数 (大盘权重)','数据维护中')}</b></div>
@@ -257,7 +257,7 @@ def get_mainland_market_env():
 
 # --- 5. 交互界面主体 ---
 st.markdown(get_v26_css(), unsafe_allow_html=True)
-st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-SHARE ADVANCED V26</h1><p>纯血 A 股智能多周期算法引擎 • 期望值自适应版</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-SHARE ADVANCED V26</h1><p>A 股智能多周期算法引擎 • 期望值自适应版</p></div>', unsafe_allow_html=True)
 
 # 侧边栏：使用手册与核心逻辑说明
 with st.sidebar:
