@@ -35,7 +35,8 @@ def normalize_a_share_code(raw_input):
     ticker = "".join(c for c in ticker if c.isalnum() or c in ['.', '-'])
     
     if ticker.isdigit() and len(ticker) == 6:
-        if ticker.startswith(('60', '68', '90')):
+        # [修复1] 补充了 51, 56, 58 等沪市 ETF 前缀，防止 510300 等被静默拦截
+        if ticker.startswith(('60', '68', '90', '51', '56', '58')):
             return f"{ticker}.SS"
         elif ticker.startswith(('00', '30', '20', '15', '16', '18')):
             return f"{ticker}.SZ"
@@ -53,7 +54,7 @@ def get_stock_name_map():
     except:
         return {}
 
-# --- 3. 核心双周期算法引擎（含杠杆ETF过滤机制） ---
+# --- 3. 核心双周期算法引擎 ---
 def diagnostic_core(ticker, market_env, name_map):
     try:
         raw_code = "".join(filter(str.isdigit, ticker))
@@ -64,9 +65,14 @@ def diagnostic_core(ticker, market_env, name_map):
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
+            
+        # [修复2] 盘后数据暴恐清洗：干掉空行，填充断点，修正Volume为0导致的除零溢出
+        df = df.dropna(how='all') 
+        df = df.ffill()           
+        df['Volume'] = df['Volume'].replace(0, np.nan).ffill().fillna(1)
         
-        df_history = df.iloc[:-1]       # 纯历史完整日线
-        intraday_k = df.iloc[-1]        # 当前日内实时K线
+        df_history = df.iloc[:-1]       
+        intraday_k = df.iloc[-1]        
 
         # 2. 特征工程深度扩展
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
@@ -81,7 +87,7 @@ def diagnostic_core(ticker, market_env, name_map):
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-6)))
         
-        # 3. 🛡️ 智能检测：杠杆资产及 ETF 特殊过滤单元
+        # 3. 智能检测：杠杆资产及 ETF 特殊过滤单元
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
         is_leveraged = "杠杆" in stock_name or "两倍" in stock_name or "3倍" in stock_name or ticker.startswith('150')
         
@@ -100,14 +106,16 @@ def diagnostic_core(ticker, market_env, name_map):
 
         # 4. 机器学习模型层
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] + (df['ATR'] * 1.5)).astype(int)
-        
         feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']
         train = df.iloc[:-1][feats + ['Target']].dropna()
         
         rf = RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42)
-        rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
+        # [逻辑修正] dropna 已经剔除了末尾缺失标签的数据，切片移除 `.iloc[:-5]` 避免误删最近有效训练集
+        rf.fit(train[feats].values, train['Target'].values)
         
         latest_feats = df[feats].iloc[[-1]].values
+        if np.isnan(latest_feats).any(): return None # 数据流防线拦截异常源
+        
         base_win_p = float(rf.predict_proba(latest_feats)[0][1])
 
         # 5. 日内高频多空博弈修正
@@ -134,16 +142,13 @@ def diagnostic_core(ticker, market_env, name_map):
         intraday_multiplier = max(0.5, min(1.4, intraday_multiplier))
         final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier))
         
-        # 6. 📐 自适应动态期望值 (EV) 数学计算
+        # 6. 自适应动态期望值 (EV) 数学计算
         tp_price = round(curr_price + (atr_now * atr_multiplier_tp), 2)
         sl_price = round(curr_price - (atr_now * atr_multiplier_sl), 2)
         
         pot_gain_pct = (tp_price - curr_price) / curr_price
         pot_loss_pct = (curr_price - sl_price) / curr_price
-        
         ev = (final_win_p * pot_gain_pct) - ((1 - final_win_p) * pot_loss_pct)
-        
-        # 结合大盘得分
         score = final_win_p * ev * market_env['risk_weight'] * 1000
         
         # 7. 实时风控标志生成
@@ -158,15 +163,15 @@ def diagnostic_core(ticker, market_env, name_map):
         elif intra_return < -0.05 and intra_position < 0.15: 
             risk_tips = "🚨 机构无底线杀跌 (严禁左侧入场)"
 
-        # 🚀 【核心修复点】这里的 Key 必须与下方的 DISPLAY_COLS 完美对齐
+        # [修复3] 输出底层原生浮点数（Float），舍弃字符映射，为UI层的完美排序打好地基
         return {
             '名称': stock_name,
             '代码': ticker,
             '实时现价': round(curr_price, 2),
-            '日内涨跌': f"{intra_return:+.2%}",
-            '基准胜率': f"{base_win_p:.1%}",
-            '动态修正胜率': f"{final_win_p:.1%}",
-            '数学期望值(EV)': f"{ev*100:+.2f}%",
+            '日内涨跌': intra_return,
+            '基准胜率': base_win_p,
+            '动态修正胜率': final_win_p,
+            '数学期望值(EV)': ev,
             '预期周期': cycle_desc,
             '建议买入价': round(curr_price * 0.992, 2),
             '推荐止盈点': tp_price,
@@ -271,13 +276,20 @@ name_map = get_stock_name_map()
 
 tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)"])
 
-# 🚀 【核心修复点】前端展示字段与核心计算字典 Key 必须严格一致
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
     '基准胜率', '动态修正胜率', 
     '数学期望值(EV)', '预期周期', '建议买入价', 
     '推荐止盈点', '推荐止损点', '实时风险提示', '综合核心评分'
 ]
+
+# 前端浮点数样式映射矩阵 (解决 Streamlit 字符串错乱排序的核心)
+format_dict = {
+    '日内涨跌': '{:+.2%}',
+    '基准胜率': '{:.1%}',
+    '动态修正胜率': '{:.1%}',
+    '数学期望值(EV)': '{:+.2%}'
+}
 
 with tab1:
     st.write("对境内核心资产沪深300全量成分股进行动态建模，自动重组高频动能得分池。")
@@ -303,10 +315,14 @@ with tab1:
         
         status_text.success("A股核心资产全量实时双周期扫描完成！")
         if results:
+            # 默认继续执行你要求的 EV 期望模型降序排序
             df_final = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
             st.subheader("🔥 实时动态高期望值选股池 (Top 20)")
+            st.caption("💡 **排序提示**：为追求最优盈亏比，默认按 **综合核心评分（EV）** 降序。如需按胜率排序，请直接点击下表的 **【动态修正胜率】** 表头。")
             st.dataframe(
-                df_final[DISPLAY_COLS].head(20).style.background_gradient(subset=['综合核心评分'], cmap='RdYlGn'),
+                df_final[DISPLAY_COLS].head(20).style
+                .format(format_dict)
+                .background_gradient(subset=['综合核心评分'], cmap='RdYlGn'),
                 width='stretch'
             )
 
@@ -339,10 +355,13 @@ with tab2:
             
             if results:
                 df_user = pd.DataFrame(results).sort_values('Score_Raw', ascending=False)
-                st.subheader("📊 A 股多周期量化诊断报告（按实时多空得分降序）")
+                st.subheader("📊 A 股多周期量化诊断报告")
+                st.caption("💡 提示：点击任意表头字段即可完成智能升/降序。")
                 st.dataframe(
-                    df_user[DISPLAY_COLS].style.background_gradient(subset=['综合核心评分'], cmap='RdYlGn'), 
+                    df_user[DISPLAY_COLS].style
+                    .format(format_dict)
+                    .background_gradient(subset=['综合核心评分'], cmap='RdYlGn'), 
                     width='stretch'
                 )
             else:
-                st.error("诊断失败：未能成功获取对应资产数据。")
+                st.error("诊断失败：未能成功获取对应资产数据（非交易时间或接口断联）。")
