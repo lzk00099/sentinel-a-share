@@ -23,14 +23,13 @@ def get_v26_css():
         .u-tips { font-size: 0.85rem; color: #444; line-height: 1.6; list-style-type: square; padding-left: 15px; }
         .stButton>button { width: 100%; border-radius: 8px; background: #800000; color: white; border: none; transition: 0.3s; font-weight: bold;}
         .stButton>button:hover { background: #ffd700; color: #000; box-shadow: 0 0 10px rgba(255,215,0,0.5); }
-        .doc-section { background: #161a22; border: 1px solid #333; padding: 20px; border-radius: 10px; margin-top: 20px; color: #ffffff; }
     </style>
     """
 
 # --- 2. 境内代码规范化辅助工具 ---
 def normalize_a_share_code(raw_input):
     """
-    清洗用户输入，过滤非A股资产，自动纠错补全后缀（支持直接输入 600519 或带后缀输入）
+    清洗用户输入，过滤非A股资产，自动纠错补全后缀
     """
     ticker = raw_input.strip().upper()
     ticker = "".join(c for c in ticker if c.isalnum() or c in ['.', '-'])
@@ -48,7 +47,6 @@ def normalize_a_share_code(raw_input):
 
 @st.cache_data(ttl=86400)
 def get_stock_name_map():
-    """缓存沪深300成分股名称，避免重复请求接口导致卡顿"""
     try:
         df_300 = ak.index_stock_cons_csindex(symbol="000300")
         return dict(zip(df_300['成分券代码'], df_300['成分券名称']))
@@ -71,13 +69,13 @@ def diagnostic_core(ticker, market_env, name_map):
         intraday_k = df.iloc[-1]        # 当前日内实时K线
 
         # 2. 特征工程深度扩展
-        df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean() # 量比：衡量当前是否放量
-        df['MA20'] = df['Close'].rolling(20).mean()                    # 20日生命线
-        df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']           # 乖离率：股价偏离均线的程度
-        df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()         # 平均真实波幅：代表近期波动率
+        df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
+        df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         df['ATR_Pct'] = df['ATR'] / df['Close']
         
-        # 计算 RSI (相对强弱指标)
+        # 计算 RSI
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
@@ -87,22 +85,20 @@ def diagnostic_core(ticker, market_env, name_map):
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
         is_leveraged = "杠杆" in stock_name or "两倍" in stock_name or "3倍" in stock_name or ticker.startswith('150')
         
-        # 自适应多空出场阀门（利用 ATR 自动计算）
-        atr_multiplier_tp = 2.5  # 止盈乘数
-        atr_multiplier_sl = 1.5  # 止损乘数
-        cycle_desc = "5-10 交易日 (个股标准周期)"
+        atr_multiplier_tp = 2.5
+        atr_multiplier_sl = 1.5
+        cycle_desc = "5-10 交易日"
         
         if is_leveraged:
-            atr_multiplier_tp = 3.5  # 杠杆资产波动大，放大止盈空间
+            atr_multiplier_tp = 3.5  
             atr_multiplier_sl = 2.0  
             cycle_desc = "2-5 交易日 (高频杠杆监控)"
         elif is_etf:
-            atr_multiplier_tp = 1.8  # 普通ETF波动小，收窄目标位
-            atr_multiplier_sl = 1.2  
+            atr_multiplier_tp = 1.8  
+            atr_multiplier_sl = 1.2 
             cycle_desc = "2-3 周 (指数趋势跟踪)"
 
-        # 4. 机器学习模型层（随机森林）
-        # 预测目标：未来5个交易日内，最高价是否能突破 [当前收盘价 + 1.5倍ATR] 的动能目标
+        # 4. 机器学习模型层
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] + (df['ATR'] * 1.5)).astype(int)
         
         feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']
@@ -114,7 +110,7 @@ def diagnostic_core(ticker, market_env, name_map):
         latest_feats = df[feats].iloc[[-1]].values
         base_win_p = float(rf.predict_proba(latest_feats)[0][1])
 
-        # 5. 日内高频多空博弈修正 (根据日内K线形态动态调整胜率)
+        # 5. 日内高频多空博弈修正
         curr_price = float(intraday_k['Close'])
         prev_close = float(df_history['Close'].iloc[-1])
         intra_high = float(intraday_k['High'])
@@ -123,23 +119,22 @@ def diagnostic_core(ticker, market_env, name_map):
         
         intra_return = (curr_price - prev_close) / prev_close
         if intra_high != intra_low:
-            intra_position = (curr_price - intra_low) / (intra_high - intra_low) # 收盘价在日内振幅的位置
+            intra_position = (curr_price - intra_low) / (intra_high - intra_low)
         else:
             intra_position = 0.5
             
-        high_fallback = (intra_high - curr_price) / (atr_now + 1e-6) # 冲高回落幅度
+        high_fallback = (intra_high - curr_price) / (atr_now + 1e-6)
         
         intraday_multiplier = 1.0
         if high_fallback > 0.4:
-            intraday_multiplier -= (high_fallback - 0.4) * 0.4  # 长上影线扣减胜率
+            intraday_multiplier -= (high_fallback - 0.4) * 0.4  
         if intra_position < 0.3:
-            intraday_multiplier -= (0.3 - intra_position) * 0.3 # 尾盘跳水扣减胜率
+            intraday_multiplier -= (0.3 - intra_position) * 0.3 
             
         intraday_multiplier = max(0.5, min(1.4, intraday_multiplier))
         final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier))
         
         # 6. 📐 自适应动态期望值 (EV) 数学计算
-        # 核心原理：EV = (胜率 * 预期盈幅) - (败率 * 预期亏幅)
         tp_price = round(curr_price + (atr_now * atr_multiplier_tp), 2)
         sl_price = round(curr_price - (atr_now * atr_multiplier_sl), 2)
         
@@ -148,13 +143,13 @@ def diagnostic_core(ticker, market_env, name_map):
         
         ev = (final_win_p * pot_gain_pct) - ((1 - final_win_p) * pot_loss_pct)
         
-        # 结合大盘得分生成最终核心评分
+        # 结合大盘得分
         score = final_win_p * ev * market_env['risk_weight'] * 1000
         
         # 7. 实时风控标志生成
-        risk_tips = "🟢 盘面良性波动"
+        risk_tips = "盘面良性波动"
         if is_leveraged:
-            risk_tips = "⚡ 杠杆工具：严防损耗与双向杀多"
+            risk_tips = "⚡ 杠杆工具：严防耗损与双向杀多"
         elif is_etf:
             risk_tips = "📦 跟踪基金：关注成分股分化"
             
@@ -163,6 +158,7 @@ def diagnostic_core(ticker, market_env, name_map):
         elif intra_return < -0.05 and intra_position < 0.15: 
             risk_tips = "🚨 机构无底线杀跌 (严禁左侧入场)"
 
+        # 🚀 【核心修复点】这里的 Key 必须与下方的 DISPLAY_COLS 完美对齐
         return {
             '名称': stock_name,
             '代码': ticker,
@@ -172,7 +168,7 @@ def diagnostic_core(ticker, market_env, name_map):
             '动态修正胜率': f"{final_win_p:.1%}",
             '数学期望值(EV)': f"{ev*100:+.2f}%",
             '预期周期': cycle_desc,
-            '建议买入价': round(curr_price * 0.992, 2), # 默认为现价下摆0.8%分批挂单
+            '建议买入价': round(curr_price * 0.992, 2),
             '推荐止盈点': tp_price,
             '推荐止损点': sl_price,
             '实时风险提示': risk_tips,
@@ -218,16 +214,16 @@ def get_mainland_market_env():
         
         if bull_ratio >= 0.8:
             env_data['risk_weight'] = 1.30
-            env_data['status'] = "四盘多头共振（全多头环境，适合积极主攻）"
+            env_data['status'] = "四盘多头共振（全多头环境，可积极主攻）"
         elif bull_ratio >= 0.5:
             env_data['risk_weight'] = 1.00
-            env_data['status'] = "指数结构分化（震荡市，需精选个股与避险）"
+            env_data['status'] = "指数结构分化（震荡市，需精选个股风格）"
         else:
             env_data['risk_weight'] = 0.70
-            env_data['status'] = "系统性多头退潮（全盘走弱，严格控制总仓位，防范破位）"
+            env_data['status'] = "系统性多头退潮（严格控制总仓位，防范破位）"
             
     except:
-        env_data['status'] = "境内风控墙离线（执行默认风控乘数 1.0）"
+        env_data['status'] = "境内风控墙离线（执行默认风控乘数）"
         
     st.markdown(f"""
     <div class="env-card">
@@ -252,51 +248,17 @@ st.markdown(get_v26_css(), unsafe_allow_html=True)
 st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-SHARE ADVANCED V26</h1><p>A 股智能多周期算法引擎 • 期望值自适应版</p></div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 🧬 SENTINEL V26 决策面板")
-    
-    # 1. 架构与模型简介
-    st.markdown("""
-    <div class="sidebar-box" style="border-left-color: #800000; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
-        <b style="color: #ffd700; font-size: 0.95rem;">📋 模型架构简介 (Model Architecture)</b><br>
-        <p style="font-size: 0.82rem; margin-top: 6px; line-height: 1.5; color: #b4c6d8;">
-        SENTINEL V26 是一款基于<b>随机森林分类器 (Random Forest)</b> 与 <b>自适应动态期望值 (Expected Value)</b> 双引擎驱动的 A 股动能博弈诊断系统。系统融合多维宏观风控墙，旨在通过数理统计优势实现仓位优选与回撤控制。
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 2. 核心量化算法
-    st.markdown("""
-    <div class="sidebar-box" style="border-left-color: #00875a; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
-        <b style="color: #00ffaa; font-size: 0.95rem;">🔬 核心量化算法 (Core Quant Logic)</b><br>
-        <ol style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.6;">
-            <li><b>自适应期望值 (Adaptive EV)：</b>利用 14 日平均真实波幅 (ATR) 动态推演盈亏比空间，取代传统固定比例风控。</li>
-            <li><b>多特征收敛 (RF Convergence)：</b>集成【量比 Volume Ratio】、【均线乖离 Bias】、【相对强弱 RSI】以及【历史波动率 ATR_Pct】作为特征向量，交叉校准未来 5 交易日的破位或突破概率。</li>
-            <li><b>高频形态修正 (Intraday Correction)：</b>深度解构日内 K 线结构，基于盘中长上影线冲高回落幅度及尾盘异动对基础胜率进行动态 alpha 纠偏。</li>
-        </ol>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 3. 推荐运行时间
-    st.markdown("""
-    <div class="sidebar-box" style="border-left-color: #ff9900; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
-        <b style="color: #ffaa00; font-size: 0.95rem;">⏱️ 推荐运行时间 (Execution Window)</b><br>
-        <p style="font-size: 0.82rem; margin-top: 6px; line-height: 1.5; color: #b4c6d8;">
-        ⚠️ <b>强烈推荐运行时间：每个交易日 <span style="color:#ff4d4d; font-weight:bold;">09:35 — 15:00</span></b><br>
-        <span style="color: #94a3b8;">*模型引入了日内实时高频 K 线流。09:30-09:35 刚开盘时，集合竞价导致的极端噪声和跳空极易引发模型胜率钝化。建议推迟 5 分钟运行，等待市场完成首轮流动性冷却，此时计算出的 EV 值与买入挂单点最符合统计学规律。</span>
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 4. 简明操作手册
-    st.markdown("""
-    <div class="sidebar-box" style="border-left-color: #0052cc; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
-        <b style="color: #3399ff; font-size: 0.95rem;">🛠️ 标准操作手册 (Operation Manual)</b><br>
-        <ul style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.5;">
-            <li><b>全量扫描：</b>点击 <i>[启动 300 蓝筹扫描]</i>，系统将一键重组当前大盘成分股的高得分池，用于多头共振期的选股。</li>
-            <li><b>单兵诊断：</b>在精准诊断页签输入目标资产代码（最多 5 个，例如 <code>600519 300750</code>），系统会自动执行清洗和智能补全。</li>
-            <li><b>挂单执行：</b>建议严格参考系统输出的 <b>[建议买入价]</b> 采用下摆网格或分批分仓挂单，切勿盲目以市价左侧追高。</li>
-            <li><b>止盈止损：</b>当价格触及 <b>[推荐止盈点]</b> 或 <b>[推荐止损点]</b> 时，应严格执行交易纪律。针对杠杆/ETF资产，系统已完成底层阈值压缩。</li>
-        </ul>
+    st.markdown("### 🧬 V26 境内自适应内核")
+    st.markdown(f"""
+    <div class="sidebar-box">
+        <b>1. 摒弃外部噪音</b><br>
+        本系统已完全阻断美股指数及港股的交叉干扰，风险乘数百分之百基于境内四大风格指数的趋势共振生成。
+        <br><br>
+        <b>2. 杠杆/ETF 特殊识别</b><br>
+        代码一旦触发 15/16/51/56 等开头，模型将自动开启<b>“基金风控过滤法”</b>。
+        <br><br>
+        <b>3. 动态盈亏比数学期望</b><br>
+        模型读取个股近期的平均真实波幅（ATR），自适应推演合乎个股基因的止盈止损点。
     </div>
     """, unsafe_allow_html=True)
 
@@ -307,8 +269,9 @@ with st.sidebar:
 market_env = get_mainland_market_env()
 name_map = get_stock_name_map()
 
-tab1, tab2, tab3 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)", "📖 新手教学与操作手册"])
+tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)"])
 
+# 🚀 【核心修复点】前端展示字段与核心计算字典 Key 必须严格一致
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
     '基准胜率', '动态修正胜率', 
@@ -350,7 +313,7 @@ with tab1:
 with tab2:
     st.write("##### 手动输入中国 A 股代码进行精准深度诊断")
     user_input = st.text_input(
-        "请输入代码（空格分隔，最多支持5个，支持 600519 或带有 .SS/.SZ 后缀形式）：", 
+        "请输入代码（空格分隔，最多支持5个）：", 
         "600519 300750 000001.SZ 159915 510300"
     )
     
@@ -382,53 +345,4 @@ with tab2:
                     width='stretch'
                 )
             else:
-                st.error("诊断失败：未能成功获取对应资产数据。请检查网络或 yfinance 接口。")
-
-with tab3:
-    # 使用原生 Markdown 配合部分 HTML 标签保持高亮，彻底解决渲染冲突
-    st.markdown("### 📖 SENTINEL V26 算法引擎实战研判与仓位风控手册")
-    st.caption("本手册旨在解构双引擎模型的底层数理逻辑，指导交易员如何结合宏观风控墙、微观个股指标进行科学的资金分配与止管执行。")
-    
-    st.write("---")
-    
-    st.markdown("#### 一、 🇨🇳 如何研判“大盘宏观环境风控墙”")
-    st.markdown("""
-    系统顶部的风控墙通过实时跟踪 **沪深300（核心资产）**、**上证指数（大盘权重）**、**创业板指（科技成长）** 和 **中证500（中盘标杆）** 的 20日生命线（MA20），计算多头共振权重：
-    
-    * 🔴 **四盘多头共振 (乘数 x1.30)：** 全盘站在 MA20 之上。市场处于强动能周期，赚钱效应极佳，模型会全面释放个股评分，提示积极主攻。
-    * 🟡 **指数结构分化 (乘数 x1.00)：** 部分指数破位，部分站稳。市场进入存量博弈或板块轮动慢牛。此时评分回归基准，应严格执行个股精选，避开破位板块。
-    * 🟢 **系统性多头退潮 (乘数 x0.70)：** 大面积跌破 MA20。市场面临系统性回撤风险。模型会大幅压低所有资产的综合核心评分，此时 **应主动降低总仓位，严防左侧抄底**。
-    """)
-
-    st.write("---")
-
-    st.markdown("#### 二、 📊 报告核心指标深度解构与战术用法")
-    st.markdown("量化报告中的每一个维度都有明确的数理统计支撑，具体用法如下：")
-    
-    # 转换为标准的 Markdown 表格，使 LaTeX 公式可以完美解析
-    st.markdown("""
-| 核心指标 | 数理逻辑与作用 | 实战具体用法 |
-| :--- | :--- | :--- |
-| **数学期望值 (EV)** | 利用 14日 ATR 动态推演盈亏比空间，计算公式为：<br>$$EV = (修正胜率 \\times 预期盈幅) - (败率 \\times 预期亏幅)$$<br>代表单次博弈的理论平均净收益率。 | 🔴 **绝对核心。** 必须为正数方可参与博弈。EV 越高，代表当前形态下的风险收益比对多头越有利。 |
-| **动态修正胜率** | 随机森林基于量比、乖离率、RSI 计算出历史基准胜率后，根据 **日内实时K线（如冲高回落幅度、尾盘跳水异动）** 进行动态高频扣减后的真实胜率。 | 若修正胜率显著低于基准胜率，说明盘中多头力量在衰竭（长上影诱多），即使历史形态再好，也应放弃当天追入。 |
-| **预期周期** | 系统自动识别资产属性：<br>个股标准周期为 5-10 交易日；<br>普通 ETF 压缩至指数趋势跟踪；<br>杠杆资产则严格锁定在 2-5 交易日的超短线。 | 用于指导时间成本控制。如果持股达到预期周期上限仍未触及止盈或止损，通常意味着动能衰竭，应考虑时间止损换筹。 |
-| **建议买入价** | 基于当前价格下摆 0.8% 作为基准挂单点。 | 拒绝市价单左侧追高。推荐使用 **下摆网格或分批限价单** 在建议价附近埋伏，等待日内波动提供流动性击穿时被动吸筹。 |
-| **推荐止盈 / 止损点** | 摒弃固定百分比，完全基于 14日平均真实波幅 (ATR) 自动测算。针对高波动杠杆资产自动放大阈值（避免被震荡洗出），针对低波动普通 ETF 自动收窄。 | 盘前必须将此处输出的止盈止损点录入交易系统。一旦价格无条件触及支撑或阻力，必须斩断主观幻想，坚决执行交易纪律。 |
-| **综合核心评分** | 计算公式：<br>$$Score = 动态修正胜率 \\times EV \\times 大盘风险权重 \\times 1000$$ | 全量扫描或多股诊断时的 **最终资金优选依据**。分值越高，说明大盘、个股动能、数理期望共振最强。 |
-""")
-
-    st.write("---")
-
-    st.markdown("#### 三、 🛡️ 凯利公式（Kelly Criterion）导向的仓位管理方案")
-    st.markdown("在实际交易中，哪怕个股评分再高，也严禁满仓孤注一掷。系统推荐采用量化领域经典的 **凯利公式变体** 来控制单资产的最高资金占用：")
-    
-    # 独立的数学公式块，确保完美渲染
-    st.markdown(r"$$建议单股最高仓位 (f^*) = \frac{动态修正胜率 \times (b + 1) - 1}{b} \times 大盘风险权重$$")
-    st.caption("注：其中 $b$ 为当前自适应盈亏比（$预期盈幅 \div 预期亏幅$）")
-    
-    st.markdown("""
-    * **分批建仓策略：** 以【建议买入价】为核心。在建议价、建议价 $- 0.5\%$、建议价 $- 1.2\%$ 采用 **3:3:4** 的比例呈金字塔状布置限价单。
-    * **实时风险提示拦截：** 
-        * 🚨 若输出触发 💥 **“机构无底线杀跌 / 盘中多头崩溃”**，证明微观结构遭到严重破坏，即使凯利公式计算有仓位，也必须放弃当天入场，严禁左侧接飞刀。
-        * ⚡ 若触发 📈 **“杠杆工具特殊提示”**，由于此类资产带有内耗属性和波动放大效应，建议将凯利公式计算出的仓位再 **主动减半** 执行，以应对损耗。
-    """)
+                st.error("诊断失败：未能成功获取对应资产数据。")
