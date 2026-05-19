@@ -187,9 +187,10 @@ def diagnostic_core(ticker, market_env, name_map):
         return None
 
 # --- 4. 境内多维大盘宏观环境风控矩阵 ---
+# --- 4. 境内多维大盘宏观环境风控矩阵 ---
 def get_mainland_market_env():
     """
-    摒弃海外干扰，全面锁定A股四大核心指数
+    全量锁定A股四大核心指数，实时拦截最新点位数值
     """
     env_data = {'risk_weight': 1.0, 'status': "未知", 'details': {}}
     try:
@@ -211,10 +212,13 @@ def get_mainland_market_env():
             if ticker in close_df.columns:
                 series = close_df[ticker].dropna()
                 if not series.empty:
-                    curr_c = series.iloc[-1]
+                    curr_c = series.iloc[-1]      # 最新实时点位
                     ma20 = series.rolling(20).mean().iloc[-1]
                     is_bull = curr_c > ma20
-                    env_data['details'][name] = "📈 站稳MA20线" if is_bull else "📉 跌破MA20线"
+                    
+                    # 拼接实时数值与方向趋势
+                    trend_icon = "📈" if is_bull else "📉"
+                    env_data['details'][name] = f"{trend_icon} {curr_c:.2f} ({'站稳' if is_bull else '跌破'}MA20)"
                     
                     # 赋予沪深300和上证指数更高的宏观风控权重
                     weight = 2 if "300" in name or "上证" in name else 1
@@ -236,15 +240,15 @@ def get_mainland_market_env():
     except:
         env_data['status'] = "境内风控墙离线（执行默认风控乘数）"
         
-    # 渲染 A 股专属宏观看板
+    # 渲染 A 股专属宏观看板 (加入最新数值展示)
     st.markdown(f"""
     <div class="env-card">
-        <h4 style='margin-top:0; color:#ffd700;'>🇨🇳 SENTINEL 境内多维宏观环境风控墙 (2026版)</h4>
+        <h4 style='margin-top:0; color:#ffd700;'>🇨🇳 SENTINEL 境内多维宏观环境风控墙 (2026 实时点位版)</h4>
         <div class="grid-4">
-            <div class="stat-box"><small>沪深300</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('沪深300 (核心资产)','数据维护中')}</b></div>
-            <div class="stat-box"><small>上证指数</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('上证指数 (大盘权重)','数据维护中')}</b></div>
-            <div class="stat-box"><small>创业板指</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('创业板指 (科技成长)','数据维护中')}</b></div>
-            <div class="stat-box"><small>中证500</small><br><b style="font-size:0.95rem; color:#fff;">{env_data['details'].get('中证500 (中盘标杆)','数据维护中')}</b></div>
+            <div class="stat-box"><small>沪深300</small><br><b style="font-size:0.9rem; color:#fff;">{env_data['details'].get('沪深300 (核心资产)','数据维护中')}</b></div>
+            <div class="stat-box"><small>上证指数</small><br><b style="font-size:0.9rem; color:#fff;">{env_data['details'].get('上证指数 (大盘权重)','数据维护中')}</b></div>
+            <div class="stat-box"><small>创业板指</small><br><b style="font-size:0.9rem; color:#fff;">{env_data['details'].get('创业板指 (科技成长)','数据维护中')}</b></div>
+            <div class="stat-box"><small>中证500</small><br><b style="font-size:0.9rem; color:#fff;">{env_data['details'].get('中证500 (中盘标杆)','数据维护中')}</b></div>
         </div>
         <div style="margin-top: 15px; text-align: center; border-top: 1px solid #333; padding-top: 10px;">
             <span>环境风控乘数：<b style="color:#ffd700; font-size:1.2rem;">x{env_data['risk_weight']}</b></span>
@@ -296,7 +300,12 @@ name_map = get_stock_name_map()
 
 # 功能标签页
 tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)"])
-DISPLAY_COLS = ['名称', '代码', '实时现价', '日内涨跌', '动态修正胜率', '数学期望值(EV)', '预期周期', '建议买入价', '推荐止盈点', '推荐止损点', '实时风险提示', '综合核心评分']
+DISPLAY_COLS = [
+    '名称', '代码', '实时现价', '日内涨跌', 
+    '基准胜率', '动态修正胜率',  # 这里被成功分拆为两列独立展示
+    '数学期望值(EV)', '预期周期', '建议买入价', 
+    '推荐止盈点', '推荐止损点', '实时风险提示', '综合核心评分'
+]
 
 with tab1:
     st.write("对境内核心资产沪深300全量成分股进行动态建模，自动重组高频动能得分池。")
