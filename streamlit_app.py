@@ -253,17 +253,51 @@ st.markdown(get_v26_css(), unsafe_allow_html=True)
 st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-SHARE ADVANCED V26</h1><p>A 股智能多周期算法引擎 • 期望值自适应版</p></div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 🧬 V26 境内自适应内核")
-    st.markdown(f"""
-    <div class="sidebar-box">
-        <b>1. 摒弃外部噪音</b><br>
-        本系统已完全阻断美股指数及港股的交叉干扰，风险乘数百分之百基于境内四大风格指数的趋势共振生成。
-        <br><br>
-        <b>2. 杠杆/ETF 特殊识别</b><br>
-        代码一旦触发 15/16/51/56 等开头，模型将自动开启<b>“基金风控过滤法”</b>。
-        <br><br>
-        <b>3. 动态盈亏比数学期望</b><br>
-        模型读取个股近期的平均真实波幅（ATR），自适应推演合乎个股基因的止盈止损点。
+    st.markdown("### 🧬 SENTINEL V26 决策面板")
+    
+    # 1. 架构与模型简介
+    st.markdown("""
+    <div class="sidebar-box" style="border-left-color: #800000; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
+        <b style="color: #ffd700; font-size: 0.95rem;">📋 模型架构简介 (Model Architecture)</b><br>
+        <p style="font-size: 0.82rem; margin-top: 6px; line-height: 1.5; color: #b4c6d8;">
+        SENTINEL V26 是一款基于<b>随机森林分类器 (Random Forest)</b> 与 <b>自适应动态期望值 (Expected Value)</b> 双引擎驱动的 A 股动能博弈诊断系统。系统融合多维宏观风控墙，旨在通过数理统计优势实现仓位优选与回撤控制。
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 2. 核心量化算法
+    st.markdown("""
+    <div class="sidebar-box" style="border-left-color: #00875a; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
+        <b style="color: #00ffaa; font-size: 0.95rem;">🔬 核心量化算法 (Core Quant Logic)</b><br>
+        <ol style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.6;">
+            <li><b>自适应期望值 (Adaptive EV)：</b>利用 14 日平均真实波幅 (ATR) 动态推演盈亏比空间，取代传统固定比例风控。</li>
+            <li><b>多特征收敛 (RF Convergence)：</b>集成【量比 Volume Ratio】、【均线乖离 Bias】、【相对强弱 RSI】以及【历史波动率 ATR_Pct】作为特征向量，交叉校准未来 5 交易日的破位或突破概率。</li>
+            <li><b>高频形态修正 (Intraday Correction)：</b>深度解构日内 K 线结构，基于盘中长上影线冲高回落幅度及尾盘异动对基础胜率进行动态 alpha 纠偏。</li>
+        </ol>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 3. 推荐运行时间
+    st.markdown("""
+    <div class="sidebar-box" style="border-left-color: #ff9900; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
+        <b style="color: #ffaa00; font-size: 0.95rem;">⏱️ 推荐运行时间 (Execution Window)</b><br>
+        <p style="font-size: 0.82rem; margin-top: 6px; line-height: 1.5; color: #b4c6d8;">
+        ⚠️ <b>强烈推荐运行时间：每个交易日 <span style="color:#ff4d4d; font-weight:bold;">09:35 — 15:00</span></b><br>
+        <span style="color: #94a3b8;">*模型引入了日内实时高频 K 线流。09:30-09:35 刚开盘时，集合竞价导致的极端噪声和跳空极易引发模型胜率钝化。建议推迟 5 分钟运行，等待市场完成首轮流动性冷却，此时计算出的 EV 值与买入挂单点最符合统计学规律。</span>
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 4. 简明操作手册
+    st.markdown("""
+    <div class="sidebar-box" style="border-left-color: #0052cc; background: #11141a; color: #e0e6ed; padding: 12px; border-radius: 6px;">
+        <b style="color: #3399ff; font-size: 0.95rem;">🛠️ 标准操作手册 (Operation Manual)</b><br>
+        <ul style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.5;">
+            <li><b>全量扫描：</b>点击 <i>[启动 300 蓝筹扫描]</i>，系统将一键重组当前大盘成分股的高得分池，用于多头共振期的选股。</li>
+            <li><b>单兵诊断：</b>在精准诊断页签输入目标资产代码（最多 5 个，例如 <code>600519 300750</code>），系统会自动执行清洗和智能补全。</li>
+            <li><b>挂单执行：</b>建议严格参考系统输出的 <b>[建议买入价]</b> 采用下摆网格或分批分仓挂单，切勿盲目以市价左侧追高。</li>
+            <li><b>止盈止损：</b>当价格触及 <b>[推荐止盈点]</b> 或 <b>[推荐止损点]</b> 时，应严格执行交易纪律。针对杠杆/ETF资产，系统已完成底层阈值压缩。</li>
+        </ul>
     </div>
     """, unsafe_allow_html=True)
 
