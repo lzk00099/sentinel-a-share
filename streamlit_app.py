@@ -32,17 +32,14 @@ def normalize_a_share_code(raw_input):
     清洗用户输入，过滤非A股资产，自动纠错补全后缀
     """
     ticker = raw_input.strip().upper()
-    # 移除可能存在的杂乱字符
     ticker = "".join(c for c in ticker if c.isalnum() or c in ['.', '-'])
     
-    # 纯数字自动智能补全
     if ticker.isdigit() and len(ticker) == 6:
         if ticker.startswith(('60', '68', '90')):
             return f"{ticker}.SS"
         elif ticker.startswith(('00', '30', '20', '15', '16', '18')):
             return f"{ticker}.SZ"
     
-    # 已经是标准格式的校验
     if ticker.endswith(('.SS', '.SZ')):
         return ticker
         
@@ -68,15 +65,15 @@ def diagnostic_core(ticker, market_env, name_map):
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
         
-        df_history = df.iloc[:-1]       # 纯历史完整日线（用于算法训练）
-        intraday_k = df.iloc[-1]        # 当前日内实时K线（用于动能修正）
+        df_history = df.iloc[:-1]       # 纯历史完整日线
+        intraday_k = df.iloc[-1]        # 当前日内实时K线
 
-        # 2. 特征工程深度扩展 (V26 增强版)
+        # 2. 特征工程深度扩展
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        df['ATR_Pct'] = df['ATR'] / df['Close'] # 归一化波动率
+        df['ATR_Pct'] = df['ATR'] / df['Close']
         
         # 计算 RSI
         change = df['Close'].diff()
@@ -85,26 +82,23 @@ def diagnostic_core(ticker, market_env, name_map):
         df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-6)))
         
         # 3. 🛡️ 智能检测：杠杆资产及 ETF 特殊过滤单元
-        # 识别境内常见的杠杆分级代码或名称特征
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
         is_leveraged = "杠杆" in stock_name or "两倍" in stock_name or "3倍" in stock_name or ticker.startswith('150')
         
-        # 依据资产属性自适应设定持有周期与风控边界
         atr_multiplier_tp = 2.5
         atr_multiplier_sl = 1.5
         cycle_desc = "5-10 交易日"
         
         if is_leveraged:
-            atr_multiplier_tp = 3.5  # 放大杠杆工具止盈空间
-            atr_multiplier_sl = 2.0  # 容忍更深的日内波动防洗盘
-            cycle_desc = "2-5 交易日 (高频高杠杆监控)"
+            atr_multiplier_tp = 3.5  
+            atr_multiplier_sl = 2.0  
+            cycle_desc = "2-5 交易日 (高频杠杆监控)"
         elif is_etf:
-            atr_multiplier_tp = 1.8  # 指数型工具收益波幅窄，调低止盈目标
+            atr_multiplier_tp = 1.8  
             atr_multiplier_sl = 1.2 
             cycle_desc = "2-3 周 (指数趋势跟踪)"
 
         # 4. 机器学习模型层
-        # 目标函数：未来5个交易日内，最高价是否能有效突破基于 ATR 的动态阻力位
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] + (df['ATR'] * 1.5)).astype(int)
         
         feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']
@@ -113,7 +107,6 @@ def diagnostic_core(ticker, market_env, name_map):
         rf = RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42)
         rf.fit(train[feats].iloc[:-5].values, train['Target'].iloc[:-5].values)
         
-        # 提取今日实时特征计算基准胜率
         latest_feats = df[feats].iloc[[-1]].values
         base_win_p = float(rf.predict_proba(latest_feats)[0][1])
 
@@ -132,12 +125,11 @@ def diagnostic_core(ticker, market_env, name_map):
             
         high_fallback = (intra_high - curr_price) / (atr_now + 1e-6)
         
-        # 修正系数计算
         intraday_multiplier = 1.0
         if high_fallback > 0.4:
-            intraday_multiplier -= (high_fallback - 0.4) * 0.4  # 上影线惩罚
+            intraday_multiplier -= (high_fallback - 0.4) * 0.4  
         if intra_position < 0.3:
-            intraday_multiplier -= (0.3 - intra_position) * 0.3 # 低位弱势惩罚
+            intraday_multiplier -= (0.3 - intra_position) * 0.3 
             
         intraday_multiplier = max(0.5, min(1.4, intraday_multiplier))
         final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier))
@@ -149,10 +141,9 @@ def diagnostic_core(ticker, market_env, name_map):
         pot_gain_pct = (tp_price - curr_price) / curr_price
         pot_loss_pct = (curr_price - sl_price) / curr_price
         
-        # EV = (胜率 * 预期收益率) - (败率 * 预期亏损率)
         ev = (final_win_p * pot_gain_pct) - ((1 - final_win_p) * pot_loss_pct)
         
-        # 结合境内大盘环境的最终评分
+        # 结合大盘得分
         score = final_win_p * ev * market_env['risk_weight'] * 1000
         
         # 7. 实时风控标志生成
@@ -165,36 +156,32 @@ def diagnostic_core(ticker, market_env, name_map):
         if high_fallback > 0.8: 
             risk_tips = "⚠️ 盘中多头崩溃 (谨防长上影诱多)"
         elif intra_return < -0.05 and intra_position < 0.15: 
-            risk_tips = "🚨 机构无底线杀跌 (严禁左侧左入)"
+            risk_tips = "🚨 机构无底线杀跌 (严禁左侧入场)"
 
+        # 🚀 【核心修复点】这里的 Key 必须与下方的 DISPLAY_COLS 完美对齐
         return {
             '名称': stock_name,
             '代码': ticker,
             '实时现价': round(curr_price, 2),
             '日内涨跌': f"{intra_return:+.2%}",
-            '基准模型胜率': f"{base_win_p:.1%}",
-            '修正后实时胜率': f"{final_win_p:.1%}",
-            '实时期望值(EV)': f"{ev*100:+.2f}%",
-            '预期周期': "5-10交易日",
-            '建议买入': round(curr_price * 0.99, 2),
-            '动态止盈参考': round(curr_price + (atr_now * 2.5), 2),
-            '动态止损建议': round(curr_price - (atr_now * 1.5), 2),
-            '实时风控提示': risk_tips,
-            '综合评分': round(score, 2),
+            '基准胜率': f"{base_win_p:.1%}",
+            '动态修正胜率': f"{final_win_p:.1%}",
+            '数学期望值(EV)': f"{ev*100:+.2f}%",
+            '预期周期': cycle_desc,
+            '建议买入价': round(curr_price * 0.992, 2),
+            '推荐止盈点': tp_price,
+            '推荐止损点': sl_price,
+            '实时风险提示': risk_tips,
+            '综合核心评分': round(score, 2),
             'Score_Raw': score 
         }
     except Exception as e:
         return None
 
 # --- 4. 境内多维大盘宏观环境风控矩阵 ---
-# --- 4. 境内多维大盘宏观环境风控矩阵 ---
 def get_mainland_market_env():
-    """
-    全量锁定A股四大核心指数，实时拦截最新点位数值
-    """
     env_data = {'risk_weight': 1.0, 'status': "未知", 'details': {}}
     try:
-        # A股四大核心风格支柱
         indices = {
             '沪深300 (核心资产)': '000300.SS', 
             '上证指数 (大盘权重)': '000001.SS', 
@@ -212,15 +199,13 @@ def get_mainland_market_env():
             if ticker in close_df.columns:
                 series = close_df[ticker].dropna()
                 if not series.empty:
-                    curr_c = series.iloc[-1]      # 最新实时点位
+                    curr_c = series.iloc[-1]      
                     ma20 = series.rolling(20).mean().iloc[-1]
                     is_bull = curr_c > ma20
                     
-                    # 拼接实时数值与方向趋势
                     trend_icon = "📈" if is_bull else "📉"
                     env_data['details'][name] = f"{trend_icon} {curr_c:.2f} ({'站稳' if is_bull else '跌破'}MA20)"
                     
-                    # 赋予沪深300和上证指数更高的宏观风控权重
                     weight = 2 if "300" in name or "上证" in name else 1
                     total_weight += weight
                     if is_bull: up_counts += weight
@@ -240,7 +225,6 @@ def get_mainland_market_env():
     except:
         env_data['status'] = "境内风控墙离线（执行默认风控乘数）"
         
-    # 渲染 A 股专属宏观看板 (加入最新数值展示)
     st.markdown(f"""
     <div class="env-card">
         <h4 style='margin-top:0; color:#ffd700;'>🇨🇳 SENTINEL 境内多维宏观环境风控墙 (2026 实时点位版)</h4>
@@ -263,7 +247,6 @@ def get_mainland_market_env():
 st.markdown(get_v26_css(), unsafe_allow_html=True)
 st.markdown('<div class="main-header"><h1>🛡️ SENTINEL A-SHARE ADVANCED V26</h1><p>A 股智能多周期算法引擎 • 期望值自适应版</p></div>', unsafe_allow_html=True)
 
-# 侧边栏：使用手册与核心逻辑说明
 with st.sidebar:
     st.markdown("### 🧬 V26 境内自适应内核")
     st.markdown(f"""
@@ -272,37 +255,26 @@ with st.sidebar:
         本系统已完全阻断美股指数及港股的交叉干扰，风险乘数百分之百基于境内四大风格指数的趋势共振生成。
         <br><br>
         <b>2. 杠杆/ETF 特殊识别</b><br>
-        代码一旦触发 15/16/51/56 等开头，模型将自动开启<b>“基金风控过滤法”</b>：自动下修止盈期望、动态缩短或拉长预期周期，规避指数基金的低弹性钝化和分级工具的恶性损耗。
+        代码一旦触发 15/16/51/56 等开头，模型将自动开启<b>“基金风控过滤法”</b>。
         <br><br>
         <b>3. 动态盈亏比数学期望</b><br>
-        拒绝一刀切的预期。模型读取个股近期的平均真实波幅（ATR），自适应推演合乎个股基因的止盈止损点，以此精密计算出真实的胜率加权期望值。
+        模型读取个股近期的平均真实波幅（ATR），自适应推演合乎个股基因的止盈止损点。
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### 📘 交易员操作手册")
-    st.markdown("""
-    <div class="sidebar-box">
-        <ul class="u-tips">
-            <li><b>输入便捷</b>：单兵扫描支持直接输入 6 位数字代码（如 300750），模型将秒级自动补全。</li>
-            <li><b>限额控制</b>：根据风控规则，单兵精准诊断单次最大提交上限为 5 个标的。</li>
-            <li><b>买入原则</b>：若“实时风险提示”抛出<b>诱多上影</b>或<b>无底线杀跌</b>，即使综合评分再高，也必须放弃左侧买入。</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
     if st.button("🧹 清理底层缓存并重置风控墙"):
         st.cache_data.clear()
         st.rerun()
 
-# 激活大盘宏观诊断
 market_env = get_mainland_market_env()
 name_map = get_stock_name_map()
 
-# 功能标签页
 tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精准诊断 (上限5个)"])
+
+# 🚀 【核心修复点】前端展示字段与核心计算字典 Key 必须严格一致
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
-    '基准胜率', '动态修正胜率',  # 这里被成功分拆为两列独立展示
+    '基准胜率', '动态修正胜率', 
     '数学期望值(EV)', '预期周期', '建议买入价', 
     '推荐止盈点', '推荐止损点', '实时风险提示', '综合核心评分'
 ]
@@ -317,7 +289,7 @@ with tab1:
                 yf_code = f"{code}.SS" if code.startswith('60') else f"{code}.SZ"
                 pool.append(yf_code)
         except:
-            pool = ["600519.SS", "300750.SZ", "601318.SS", "000001.SZ"] # 核心兜底
+            pool = ["600519.SS", "300750.SZ", "601318.SS", "000001.SZ"] 
 
         results = []
         progress_bar = st.progress(0)
@@ -340,8 +312,6 @@ with tab1:
 
 with tab2:
     st.write("##### 手动输入中国 A 股代码进行精准深度诊断")
-    st.caption("提示：支持标准格式（如 600519.SS）或直接输入 6 位数字代码（如 000001），系统会自动进行格式规范化。")
-    
     user_input = st.text_input(
         "请输入代码（空格分隔，最多支持5个）：", 
         "600519 300750 000001.SZ 159915 510300"
@@ -351,13 +321,11 @@ with tab2:
         raw_tickers = user_input.replace(',', ' ').split()
         cleaned_tickers = []
         
-        # 净化并转换代码
         for r_t in raw_tickers:
             normed = normalize_a_share_code(r_t)
             if normed:
                 cleaned_tickers.append(normed)
         
-        # 截取前 5 个有效 A 股标的
         final_tickers = cleaned_tickers[:5]
         
         if not final_tickers:
@@ -377,4 +345,4 @@ with tab2:
                     width='stretch'
                 )
             else:
-                st.error("诊断失败：未能成功获取对应资产的日线或盘中实时数据，请检查网络或 yfinance 境内接口。")
+                st.error("诊断失败：未能成功获取对应资产数据。")
