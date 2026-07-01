@@ -143,44 +143,6 @@ def get_stock_hist_features(raw_code):
 
     return df_hist[['Trade_Date', 'Turnover', 'Amount_AK']].dropna(subset=['Trade_Date'])
 
-@st.cache_data(ttl=43200)
-def get_northbound_history(raw_code):
-    def loader():
-        for func_name in ("stock_hsgt_individual_em", "stock_hsgt_individual_detail_em"):
-            func = getattr(ak, func_name, None)
-            if func is None:
-                continue
-            try:
-                return func(symbol=raw_code)
-            except TypeError:
-                try:
-                    return func(stock=raw_code)
-                except Exception:
-                    continue
-            except Exception:
-                continue
-        return pd.DataFrame()
-
-    df_nb = fetch_with_timeout(loader, seconds=3, default=pd.DataFrame())
-    if df_nb is None or df_nb.empty:
-        return pd.DataFrame()
-
-    df_nb = df_nb.copy()
-    date_col = next((c for c in ['持股日期', '日期'] if c in df_nb.columns), None)
-    if date_col is None:
-        return pd.DataFrame()
-
-    df_nb['Trade_Date'] = pd.to_datetime(df_nb[date_col], errors='coerce').dt.normalize()
-    hold_pct_col = next((c for c in ['持股数量占A股百分比', '占总股本比例', '持股占比'] if c in df_nb.columns), None)
-    flow_col = next((c for c in ['今日增持资金', '增持金额', '持股市值变化'] if c in df_nb.columns), None)
-
-    df_nb['North_Hold_Pct'] = clean_numeric_series(df_nb[hold_pct_col]) / 100.0 if hold_pct_col else 0.0
-    df_nb['North_Flow'] = clean_numeric_series(df_nb[flow_col]) if flow_col else 0.0
-    df_nb = df_nb.dropna(subset=['Trade_Date']).sort_values('Trade_Date')
-    df_nb['North_Flow_5D'] = df_nb['North_Flow'].rolling(5, min_periods=1).sum()
-
-    return df_nb[['Trade_Date', 'North_Hold_Pct', 'North_Flow', 'North_Flow_5D']]
-
 def infer_limit_pct(raw_code, stock_name):
     upper_name = str(stock_name).upper()
     if 'ST' in upper_name:
@@ -233,7 +195,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
         spot_turnover = spot_turnover_raw / 100.0 if not np.isnan(spot_turnover_raw) else np.nan
         spot_vol_ratio = safe_float(spot_row.get('量比'), np.nan)
         spot_amount = safe_float(spot_row.get('成交额'), np.nan)
-        float_mv = safe_float(spot_row.get('流通市值'), np.nan)
 
         hist_features = get_stock_hist_features(raw_code) if enable_slow_features else pd.DataFrame()
         hist_available = hist_features is not None and not hist_features.empty and hist_features['Turnover'].notna().any()
@@ -263,20 +224,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
         df['Amount_Ratio'] = df['Amount'] / (df['Amount'].rolling(20).mean() + 1e-6)
         df['Liquidity_Amihud'] = df['Close'].pct_change().abs() / ((df['Amount'] / 1e8) + 1e-6)
 
-        north_features = get_northbound_history(raw_code) if enable_slow_features else pd.DataFrame()
-        north_available = north_features is not None and not north_features.empty
-        if north_available:
-            north_idx = north_features.drop_duplicates('Trade_Date').set_index('Trade_Date')
-            df['North_Hold_Pct'] = df['Trade_Date'].map(north_idx['North_Hold_Pct']).ffill().fillna(0.0)
-            df['North_Flow_5D'] = df['Trade_Date'].map(north_idx['North_Flow_5D']).ffill().fillna(0.0)
-        else:
-            df['North_Hold_Pct'] = 0.0
-            df['North_Flow_5D'] = 0.0
-        if not np.isnan(float_mv) and float_mv > 0:
-            df['North_Flow_5D_Pct'] = df['North_Flow_5D'] / (float_mv + 1e-6)
-        else:
-            df['North_Flow_5D_Pct'] = df['North_Flow_5D'] / ((df['Amount'].rolling(20).mean() * 5) + 1e-6)
-
         limit_pct = infer_limit_pct(raw_code, stock_name)
         limit_up_price = df['Close'].shift(1) * (1 + limit_pct)
         df['Limit_Distance'] = (limit_up_price - df['Close']) / (df['Close'] + 1e-6)
@@ -287,12 +234,7 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
 
         latest_turnover_display = spot_turnover if not np.isnan(spot_turnover) else float(df['Turnover'].iloc[-1])
         latest_turnover_strength = spot_vol_ratio if not np.isnan(spot_vol_ratio) else float(df['Turnover_Ratio5'].iloc[-1])
-        latest_north_hold_pct = float(df['North_Hold_Pct'].iloc[-1])
-        latest_north_flow_5d = float(df['North_Flow_5D'].iloc[-1])
-        data_quality_note = " / ".join([
-            "换手率OK" if hist_available else ("实时换手OK" if not np.isnan(spot_turnover) else "换手率降级"),
-            "北向OK" if north_available else ("北向跳过" if not enable_slow_features else "北向降级")
-        ])
+        data_quality_note = "换手率OK" if hist_available else ("实时换手OK" if not np.isnan(spot_turnover) else "换手率降级")
         
         # 3. 智能检测：杠杆资产及 ETF 特殊过滤单元
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
@@ -323,7 +265,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             'Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct',
             'Turnover', 'Turnover_Ratio5', 'Turnover_Z20',
             'Amount_Ratio', 'Liquidity_Amihud',
-            'North_Hold_Pct', 'North_Flow_5D_Pct',
             'Limit_Distance', 'Hit_Limit_Up', 'Limit_Break',
             'Close_Position', 'Upper_Shadow_ATR'
         ]
@@ -369,7 +310,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
         latest_limit_break = float(df['Limit_Break'].iloc[-1])
         latest_hit_limit = float(df['Hit_Limit_Up'].iloc[-1])
         latest_close_position = float(df['Close_Position'].iloc[-1])
-        latest_north_flow_5d_pct = float(df['North_Flow_5D_Pct'].iloc[-1])
 
         a_share_multiplier = 1.0
         if latest_turnover_strength > 1.8 and latest_close_position > 0.55:
@@ -380,10 +320,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             a_share_multiplier -= 0.18
         elif latest_hit_limit > 0.5 and latest_close_position > 0.75:
             a_share_multiplier += 0.08
-        if latest_north_flow_5d_pct > 0.003:
-            a_share_multiplier += 0.05
-        elif latest_north_flow_5d_pct < -0.003:
-            a_share_multiplier -= 0.05
 
         a_share_multiplier = max(0.75, min(1.25, a_share_multiplier))
         final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier * a_share_multiplier))
@@ -422,8 +358,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             '数学期望值(EV)': ev,
             '换手率': latest_turnover_display,
             '换手强度': latest_turnover_strength,
-            '北向持股占比': latest_north_hold_pct,
-            '北向5日资金': latest_north_flow_5d,
             'A股特征修正': a_share_multiplier,
             '预期周期': cycle_desc,
             '建议买入价': round(curr_price * 0.992, 2),
@@ -567,8 +501,7 @@ tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精�
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
     '基准胜率', '动态修正胜率', 
-    '数学期望值(EV)', '换手率', '换手强度', '北向持股占比', '北向5日资金',
-    'A股特征修正', '预期周期', '建议买入价', 
+    '数学期望值(EV)', '换手率', '换手强度', 'A股特征修正', '预期周期', '建议买入价', 
     '推荐止盈点', '推荐止损点', '实时风险提示', '数据质量', '综合核心评分'
 ]
 
@@ -580,8 +513,6 @@ format_dict = {
     '数学期望值(EV)': '{:+.2%}',
     '换手率': '{:.2%}',
     '换手强度': '{:.2f}x',
-    '北向持股占比': '{:.2%}',
-    '北向5日资金': '{:+,.0f}',
     'A股特征修正': '{:.2f}x'
 }
 
