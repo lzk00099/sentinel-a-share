@@ -6,7 +6,6 @@ import akshare as ak
 from sklearn.ensemble import RandomForestClassifier
 import warnings
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 # --- 基础配置 ---
 warnings.filterwarnings('ignore')
@@ -56,104 +55,7 @@ def get_stock_name_map():
         return {}
 
 # --- 3. 核心双周期算法引擎 ---
-def safe_float(value, default=np.nan):
-    try:
-        if value is None:
-            return default
-        if isinstance(value, str):
-            value = value.replace("%", "").replace(",", "").strip()
-            if value in ("", "-", "--", "None", "nan"):
-                return default
-        if pd.isna(value):
-            return default
-        return float(value)
-    except:
-        return default
-
-def clean_numeric_series(series):
-    return pd.to_numeric(
-        series.astype(str)
-        .str.replace("%", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.strip()
-        .replace({"": np.nan, "-": np.nan, "--": np.nan, "None": np.nan, "nan": np.nan}),
-        errors='coerce'
-    )
-
-def fetch_with_timeout(callable_fn, seconds=3, default=None):
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(callable_fn)
-    try:
-        return future.result(timeout=seconds)
-    except (FuturesTimeout, Exception):
-        return default
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-@st.cache_data(ttl=300)
-def get_a_share_spot_map():
-    df_spot = fetch_with_timeout(lambda: ak.stock_zh_a_spot_em(), seconds=5, default=pd.DataFrame())
-    if df_spot is None or df_spot.empty or '代码' not in df_spot.columns:
-        return {}
-
-    df_spot = df_spot.copy()
-    df_spot['代码'] = df_spot['代码'].astype(str).str.zfill(6)
-    useful_cols = ['代码', '换手率', '量比', '成交额', '流通市值', '总市值', '涨跌幅']
-    useful_cols = [c for c in useful_cols if c in df_spot.columns]
-    return df_spot[useful_cols].set_index('代码').to_dict('index')
-
-@st.cache_data(ttl=1800)
-def get_stock_hist_features(raw_code):
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - pd.Timedelta(days=520)).strftime("%Y%m%d")
-
-    def loader():
-        try:
-            return ak.stock_zh_a_hist(
-                symbol=raw_code,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust="qfq",
-                timeout=3
-            )
-        except TypeError:
-            return ak.stock_zh_a_hist(
-                symbol=raw_code,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust="qfq"
-            )
-
-    df_hist = fetch_with_timeout(loader, seconds=4, default=pd.DataFrame())
-    if df_hist is None or df_hist.empty or '日期' not in df_hist.columns:
-        return pd.DataFrame()
-
-    df_hist = df_hist.copy()
-    df_hist['Trade_Date'] = pd.to_datetime(df_hist['日期'], errors='coerce').dt.normalize()
-    if '换手率' in df_hist.columns:
-        df_hist['Turnover'] = clean_numeric_series(df_hist['换手率']) / 100.0
-    else:
-        df_hist['Turnover'] = np.nan
-    if '成交额' in df_hist.columns:
-        df_hist['Amount_AK'] = clean_numeric_series(df_hist['成交额'])
-    else:
-        df_hist['Amount_AK'] = np.nan
-
-    return df_hist[['Trade_Date', 'Turnover', 'Amount_AK']].dropna(subset=['Trade_Date'])
-
-def infer_limit_pct(raw_code, stock_name):
-    upper_name = str(stock_name).upper()
-    if 'ST' in upper_name:
-        return 0.05
-    if raw_code.startswith(('30', '68')):
-        return 0.20
-    if raw_code.startswith(('8', '4')):
-        return 0.30
-    return 0.10
-
-def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
+def diagnostic_core(ticker, market_env, name_map):
     try:
         raw_code = "".join(filter(str.isdigit, ticker))
         stock_name = name_map.get(raw_code, "A股目标资产")
@@ -184,57 +86,6 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-6)))
-
-        trade_dates = pd.to_datetime(df.index)
-        if getattr(trade_dates, "tz", None) is not None:
-            trade_dates = trade_dates.tz_convert(None)
-        df['Trade_Date'] = trade_dates.normalize()
-
-        spot_row = get_a_share_spot_map().get(raw_code, {})
-        spot_turnover_raw = safe_float(spot_row.get('换手率'), np.nan)
-        spot_turnover = spot_turnover_raw / 100.0 if not np.isnan(spot_turnover_raw) else np.nan
-        spot_vol_ratio = safe_float(spot_row.get('量比'), np.nan)
-        spot_amount = safe_float(spot_row.get('成交额'), np.nan)
-
-        hist_features = get_stock_hist_features(raw_code) if enable_slow_features else pd.DataFrame()
-        hist_available = hist_features is not None and not hist_features.empty and hist_features['Turnover'].notna().any()
-        if hist_available:
-            hist_idx = hist_features.drop_duplicates('Trade_Date').set_index('Trade_Date')
-            df['Turnover'] = df['Trade_Date'].map(hist_idx['Turnover'])
-            df['Amount_AK'] = df['Trade_Date'].map(hist_idx['Amount_AK'])
-            if not np.isnan(spot_turnover):
-                df.at[df.index[-1], 'Turnover'] = spot_turnover
-        else:
-            df['Turnover'] = 0.0
-            df['Amount_AK'] = np.nan
-
-        df['Amount_Est'] = df['Close'] * df['Volume']
-        df['Amount'] = df['Amount_AK'].fillna(df['Amount_Est'])
-        if not np.isnan(spot_amount):
-            df.at[df.index[-1], 'Amount'] = spot_amount
-
-        if hist_available:
-            df['Turnover'] = df['Turnover'].ffill().fillna(df['Turnover'].median()).fillna(0.0)
-            df['Turnover_Ratio5'] = df['Turnover'] / (df['Turnover'].rolling(5).mean() + 1e-6)
-            df['Turnover_Z20'] = (df['Turnover'] - df['Turnover'].rolling(20).mean()) / (df['Turnover'].rolling(20).std() + 1e-6)
-        else:
-            df['Turnover_Ratio5'] = 1.0
-            df['Turnover_Z20'] = 0.0
-
-        df['Amount_Ratio'] = df['Amount'] / (df['Amount'].rolling(20).mean() + 1e-6)
-        df['Liquidity_Amihud'] = df['Close'].pct_change().abs() / ((df['Amount'] / 1e8) + 1e-6)
-
-        limit_pct = infer_limit_pct(raw_code, stock_name)
-        limit_up_price = df['Close'].shift(1) * (1 + limit_pct)
-        df['Limit_Distance'] = (limit_up_price - df['Close']) / (df['Close'] + 1e-6)
-        df['Hit_Limit_Up'] = (df['High'] >= limit_up_price * 0.997).astype(float)
-        df['Limit_Break'] = ((df['High'] >= limit_up_price * 0.997) & (df['Close'] < limit_up_price * 0.985)).astype(float)
-        df['Close_Position'] = (df['Close'] - df['Low']) / ((df['High'] - df['Low']) + 1e-6)
-        df['Upper_Shadow_ATR'] = (df['High'] - df[['Open', 'Close']].max(axis=1)) / (df['ATR'] + 1e-6)
-
-        latest_turnover_display = spot_turnover if not np.isnan(spot_turnover) else float(df['Turnover'].iloc[-1])
-        latest_turnover_strength = spot_vol_ratio if not np.isnan(spot_vol_ratio) else float(df['Turnover_Ratio5'].iloc[-1])
-        data_quality_note = "换手率OK" if hist_available else ("实时换手OK" if not np.isnan(spot_turnover) else "换手率降级")
         
         # 3. 智能检测：杠杆资产及 ETF 特殊过滤单元
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
@@ -254,35 +105,18 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             cycle_desc = "2-3 周 (指数趋势跟踪)"
 
         # 4. 机器学习模型层
-        future_high = df['High'].shift(-1).rolling(5).max().shift(-4)
-        valid_target = future_high.notna() & df['ATR'].notna()
-        df['Target'] = np.nan
-        df.loc[valid_target, 'Target'] = (
-            future_high[valid_target] > df.loc[valid_target, 'Close'] + (df.loc[valid_target, 'ATR'] * 1.5)
-        ).astype(int)
-
-        feats = [
-            'Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct',
-            'Turnover', 'Turnover_Ratio5', 'Turnover_Z20',
-            'Amount_Ratio', 'Liquidity_Amihud',
-            'Limit_Distance', 'Hit_Limit_Up', 'Limit_Break',
-            'Close_Position', 'Upper_Shadow_ATR'
-        ]
-        model_frame = df[feats + ['Target']].replace([np.inf, -np.inf], np.nan)
-        train = model_frame.dropna()
+        df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] + (df['ATR'] * 1.5)).astype(int)
+        feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']
+        train = df.iloc[:-1][feats + ['Target']].dropna()
         
-        latest_frame = df[feats].replace([np.inf, -np.inf], np.nan).iloc[[-1]]
-        core_latest = latest_frame[['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']]
-        if core_latest.isna().any().any():
-            return None
-        latest_frame = latest_frame.fillna(0.0)
-
-        if len(train) >= 50 and train['Target'].nunique() >= 2:
-            rf = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_leaf=4, random_state=42)
-            rf.fit(train[feats].values, train['Target'].values)
-            base_win_p = float(rf.predict_proba(latest_frame.values)[0][1])
-        else:
-            base_win_p = 0.50
+        rf = RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42)
+        # [逻辑修正] dropna 已经剔除了末尾缺失标签的数据，切片移除 `.iloc[:-5]` 避免误删最近有效训练集
+        rf.fit(train[feats].values, train['Target'].values)
+        
+        latest_feats = df[feats].iloc[[-1]].values
+        if np.isnan(latest_feats).any(): return None # 数据流防线拦截异常源
+        
+        base_win_p = float(rf.predict_proba(latest_feats)[0][1])
 
         # 5. 日内高频多空博弈修正
         curr_price = float(intraday_k['Close'])
@@ -306,23 +140,7 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             intraday_multiplier -= (0.3 - intra_position) * 0.3 
             
         intraday_multiplier = max(0.5, min(1.4, intraday_multiplier))
-
-        latest_limit_break = float(df['Limit_Break'].iloc[-1])
-        latest_hit_limit = float(df['Hit_Limit_Up'].iloc[-1])
-        latest_close_position = float(df['Close_Position'].iloc[-1])
-
-        a_share_multiplier = 1.0
-        if latest_turnover_strength > 1.8 and latest_close_position > 0.55:
-            a_share_multiplier += 0.07
-        if latest_turnover_strength > 3.0 and high_fallback > 0.5:
-            a_share_multiplier -= 0.12
-        if latest_limit_break > 0.5:
-            a_share_multiplier -= 0.18
-        elif latest_hit_limit > 0.5 and latest_close_position > 0.75:
-            a_share_multiplier += 0.08
-
-        a_share_multiplier = max(0.75, min(1.25, a_share_multiplier))
-        final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier * a_share_multiplier))
+        final_win_p = max(0.01, min(0.99, base_win_p * intraday_multiplier))
         
         # 6. 自适应动态期望值 (EV) 数学计算
         tp_price = round(curr_price + (atr_now * atr_multiplier_tp), 2)
@@ -340,9 +158,7 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
         elif is_etf:
             risk_tips = "📦 跟踪基金：关注成分股分化"
             
-        if latest_limit_break > 0.5:
-            risk_tips = "⚠️ 涨停炸板回落 (短线分歧显著放大)"
-        elif high_fallback > 0.8: 
+        if high_fallback > 0.8: 
             risk_tips = "⚠️ 盘中多头崩溃 (谨防长上影诱多)"
         elif intra_return < -0.05 and intra_position < 0.15: 
             risk_tips = "🚨 机构无底线杀跌 (严禁左侧入场)"
@@ -356,15 +172,11 @@ def diagnostic_core(ticker, market_env, name_map, enable_slow_features=True):
             '基准胜率': base_win_p,
             '动态修正胜率': final_win_p,
             '数学期望值(EV)': ev,
-            '换手率': latest_turnover_display,
-            '换手强度': latest_turnover_strength,
-            'A股特征修正': a_share_multiplier,
             '预期周期': cycle_desc,
             '建议买入价': round(curr_price * 0.992, 2),
             '推荐止盈点': tp_price,
             '推荐止损点': sl_price,
             '实时风险提示': risk_tips,
-            '数据质量': data_quality_note,
             '综合核心评分': round(score, 2),
             'Score_Raw': score 
         }
@@ -501,8 +313,8 @@ tab1, tab2 = st.tabs(["🚀 沪深300 成分全量扫描", "🔍 A股单兵精�
 DISPLAY_COLS = [
     '名称', '代码', '实时现价', '日内涨跌', 
     '基准胜率', '动态修正胜率', 
-    '数学期望值(EV)', '换手率', '换手强度', 'A股特征修正', '预期周期', '建议买入价', 
-    '推荐止盈点', '推荐止损点', '实时风险提示', '数据质量', '综合核心评分'
+    '数学期望值(EV)', '预期周期', '建议买入价', 
+    '推荐止盈点', '推荐止损点', '实时风险提示', '综合核心评分'
 ]
 
 # 前端浮点数样式映射矩阵 (解决 Streamlit 字符串错乱排序的核心)
@@ -510,10 +322,7 @@ format_dict = {
     '日内涨跌': '{:+.2%}',
     '基准胜率': '{:.1%}',
     '动态修正胜率': '{:.1%}',
-    '数学期望值(EV)': '{:+.2%}',
-    '换手率': '{:.2%}',
-    '换手强度': '{:.2f}x',
-    'A股特征修正': '{:.2f}x'
+    '数学期望值(EV)': '{:+.2%}'
 }
 
 with tab1:
@@ -534,7 +343,7 @@ with tab1:
         
         for i, t in enumerate(pool):
             status_text.text(f"正在全量建模分析 ({i+1}/{len(pool)}): {t}...")
-            res = diagnostic_core(t, market_env, name_map, enable_slow_features=False)
+            res = diagnostic_core(t, market_env, name_map)
             if res: results.append(res)
             progress_bar.progress((i + 1) / len(pool))
         
@@ -575,7 +384,7 @@ with tab2:
             results = []
             for t in final_tickers:
                 with st.spinner(f"正在深度诊断境内资产 {t}..."):
-                    res = diagnostic_core(t, market_env, name_map, enable_slow_features=True)
+                    res = diagnostic_core(t, market_env, name_map)
                     if res: results.append(res)
             
             if results:
