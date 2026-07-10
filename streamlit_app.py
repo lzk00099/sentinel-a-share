@@ -331,9 +331,10 @@ with tab1:
         try:
             df_300 = ak.index_stock_cons_csindex(symbol="000300")
             pool = []
-            for code in df_300['成分券代码']:
-                yf_code = f"{code}.SS" if code.startswith('60') else f"{code}.SZ"
-                pool.append(yf_code)
+            for code in df_300['成分券代码'].astype(str).str.zfill(6):
+                yf_code = normalize_a_share_code(code)
+                if yf_code:
+                    pool.append(yf_code)
         except:
             pool = ["600519.SS", "300750.SZ", "601318.SS", "000001.SZ"] 
 
