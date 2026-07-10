@@ -6,6 +6,7 @@ import akshare as ak
 from sklearn.ensemble import RandomForestClassifier
 import warnings
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # --- 基础配置 ---
 warnings.filterwarnings('ignore')
@@ -31,13 +32,18 @@ def normalize_a_share_code(raw_input):
     """
     清洗用户输入，过滤非A股资产，自动纠错补全后缀
     """
-    ticker = raw_input.strip().upper()
+    ticker = str(raw_input).strip().upper()
+    ticker = ticker.replace(".SH", ".SS")
+    if ticker.endswith(".0") and ticker[:-2].isdigit():
+        ticker = ticker[:-2]
     ticker = "".join(c for c in ticker if c.isalnum() or c in ['.', '-'])
     
-    if ticker.isdigit() and len(ticker) == 6:
-        # [修复1] 补充了 51, 56, 58 等沪市 ETF 前缀，防止 510300 等被静默拦截
-        if ticker.startswith(('60', '68', '90', '51', '56', '58')):
+    if ticker.isdigit() and len(ticker) <= 6:
+        ticker = ticker.zfill(6)
+        # 沪市：主板/科创板/B股/常见沪市 ETF
+        if ticker.startswith(('60', '68', '90', '50', '51', '52', '56', '58')):
             return f"{ticker}.SS"
+        # 深市：主板/创业板/B股/常见深市 ETF、LOF
         elif ticker.startswith(('00', '30', '20', '15', '16', '18')):
             return f"{ticker}.SZ"
     
@@ -46,10 +52,68 @@ def normalize_a_share_code(raw_input):
         
     return None
 
-@st.cache_data(ttl=86400)
+def run_with_timeout(func, timeout_seconds=25):
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except (TimeoutError, Exception):
+        return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+def get_constituent_columns(df):
+    code_candidates = ['成分券代码', '证券代码', '品种代码', '股票代码', '代码']
+    name_candidates = ['成分券名称', '证券简称', '品种名称', '股票简称', '名称']
+    code_col = next((col for col in code_candidates if col in df.columns), None)
+    name_col = next((col for col in name_candidates if col in df.columns), None)
+    return code_col, name_col
+
+def normalize_constituent_frame(df):
+    code_col, name_col = get_constituent_columns(df)
+    if df is None or df.empty or code_col is None:
+        return pd.DataFrame(columns=['成分券代码', '成分券名称'])
+    
+    out = pd.DataFrame()
+    out['成分券代码'] = (
+        df[code_col]
+        .astype(str)
+        .str.replace(r'\.0$', '', regex=True)
+        .str.extract(r'(\d{1,6})', expand=False)
+        .fillna('')
+        .str.zfill(6)
+    )
+    if name_col:
+        out['成分券名称'] = df[name_col].astype(str)
+    else:
+        out['成分券名称'] = "A股目标资产"
+
+    out = out[out['成分券代码'].map(lambda code: normalize_a_share_code(code) is not None)]
+    return out.drop_duplicates('成分券代码').reset_index(drop=True)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_hs300_constituents():
+    providers = [
+        lambda: ak.index_stock_cons_csindex(symbol="000300"),
+    ]
+    if hasattr(ak, "index_stock_cons_sina"):
+        providers.append(lambda: ak.index_stock_cons_sina(symbol="000300"))
+
+    for provider in providers:
+        df = run_with_timeout(provider, timeout_seconds=25)
+        normalized = normalize_constituent_frame(df)
+        if len(normalized) >= 50:
+            return normalized
+
+    return pd.DataFrame({
+        '成分券代码': ['600519', '300750', '601318', '000001'],
+        '成分券名称': ['贵州茅台', '宁德时代', '中国平安', '平安银行']
+    })
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_name_map():
     try:
-        df_300 = ak.index_stock_cons_csindex(symbol="000300")
+        df_300 = get_hs300_constituents()
         return dict(zip(df_300['成分券代码'], df_300['成分券名称']))
     except:
         return {}
@@ -61,7 +125,14 @@ def diagnostic_core(ticker, market_env, name_map):
         stock_name = name_map.get(raw_code, "A股目标资产")
 
         # 1. 下载混合数据集 (包含实时未完结K线)
-        df = yf.download(ticker, period="260d", progress=False, auto_adjust=True)
+        df = yf.download(
+            ticker,
+            period="260d",
+            progress=False,
+            auto_adjust=True,
+            timeout=15,
+            threads=False
+        )
         if df.empty or len(df) < 60: return None
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
@@ -194,7 +265,13 @@ def get_mainland_market_env():
             '中证500 (中盘标杆)': '000905.SS'
         }
         
-        m_data = yf.download(list(indices.values()), period="50d", progress=False)
+        m_data = yf.download(
+            list(indices.values()),
+            period="50d",
+            progress=False,
+            timeout=15,
+            threads=False
+        )
         close_df = m_data['Close'] if isinstance(m_data.columns, pd.MultiIndex) else m_data
             
         up_counts = 0
@@ -329,12 +406,17 @@ with tab1:
     st.write("对境内核心资产沪深300全量成分股进行动态建模，自动重组高频动能得分池。")
     if st.button("启动 300 蓝筹全量量化扫描"):
         try:
-            df_300 = ak.index_stock_cons_csindex(symbol="000300")
+            df_300 = get_hs300_constituents()
             pool = []
-            for code in df_300['成分券代码'].astype(str).str.zfill(6):
+            for code in df_300['成分券代码']:
                 yf_code = normalize_a_share_code(code)
                 if yf_code:
                     pool.append(yf_code)
+            pool = list(dict.fromkeys(pool))
+            if not pool:
+                raise ValueError("沪深300成分代码池为空")
+            if len(pool) < 50:
+                st.warning("沪深300成分接口暂时不可用，已启用备用小样本池，避免页面卡死。")
         except:
             pool = ["600519.SS", "300750.SZ", "601318.SS", "000001.SZ"] 
 
