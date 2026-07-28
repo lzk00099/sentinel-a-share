@@ -63,10 +63,13 @@ def run_with_timeout(func, timeout_seconds=25):
         executor.shutdown(wait=False, cancel_futures=True)
 
 def get_constituent_columns(df):
-    code_candidates = ['成分券代码', '证券代码', '品种代码', '股票代码', '代码']
-    name_candidates = ['成分券名称', '证券简称', '品种名称', '股票简称', '名称']
+    # 增加英文键名 'code', 'name' 以应对 API 上游暗改
+    code_candidates = ['成分券代码', '证券代码', '品种代码', '股票代码', '代码', 'code']
+    name_candidates = ['成分券名称', '证券简称', '品种名称', '股票简称', '名称', 'name']
+    
     code_col = next((col for col in code_candidates if col in df.columns), None)
     name_col = next((col for col in name_candidates if col in df.columns), None)
+    
     return code_col, name_col
 
 def normalize_constituent_frame(df):
@@ -113,10 +116,24 @@ def get_hs300_constituents():
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_name_map():
     try:
+        # 【升级】直接拉取 A 股全市场股票字典，覆盖5000+只股票
+        df_all = ak.stock_info_a_code_name()
+        
+        # akshare 全市场接口默认包含 'code' 和 'name' 列
+        if 'code' in df_all.columns and 'name' in df_all.columns:
+            return dict(zip(df_all['code'].astype(str), df_all['name'].astype(str)))
+    except Exception as e:
+        pass
+        
+    # 如果全市场接口意外断联，退化到原有的沪深300兜底策略
+    try:
         df_300 = get_hs300_constituents()
         return dict(zip(df_300['成分券代码'], df_300['成分券名称']))
     except:
-        return {}
+        return {
+            '600519': '贵州茅台', '300750': '宁德时代',
+            '601318': '中国平安', '000001': '平安银行'
+        }
 
 # --- 3. 核心双周期算法引擎 ---
 def diagnostic_core(ticker, market_env, name_map):
