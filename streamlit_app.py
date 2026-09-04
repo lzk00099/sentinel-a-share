@@ -137,28 +137,50 @@ def diagnostic_core(ticker, market_env, name_map):
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
             
-        # [修复2] 盘后数据暴恐清洗：干掉空行，填充断点，修正Volume为0导致的除零溢出
-        df = df.dropna(how='all') 
-        df = df.ffill()           
-        df['Volume'] = df['Volume'].replace(0, np.nan).ffill().fillna(1)
-        
-        df_history = df.iloc[:-1]       
-        intraday_k = df.iloc[-1]        
-
-        # 2. 特征工程深度扩展
+        # 2. 个股基础特征工程
         df['Vol_Ratio'] = df['Volume'] / df['Volume'].rolling(5).mean()
         df['MA20'] = df['Close'].rolling(20).mean()
         df['Bias'] = (df['Close'] - df['MA20']) / df['MA20']
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         df['ATR_Pct'] = df['ATR'] / df['Close']
         
-        # 计算 RSI
         change = df['Close'].diff()
         gain = (change.where(change > 0, 0)).rolling(14).mean()
         loss = (-change.where(change < 0, 0)).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + gain / (loss + 1e-6)))
+
+        # ================= 新增：大盘共振与相对强弱特征注入 =================
+        feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct'] # 初始化特征列表
         
+        index_df = market_env.get('index_df')
+        if index_df is not None and not index_df.empty:
+            bm_ticker = '000300.SS' # 以沪深300作为基准水位锚点
+            if bm_ticker in index_df.columns:
+                # 按日期左连接大盘数据，并前向填充防止节假日错位
+                df = df.join(index_df[[bm_ticker]].rename(columns={bm_ticker: 'BM_Close'}), how='left')
+                df['BM_Close'] = df['BM_Close'].ffill()
+                
+                # 特征A: 10日相对强弱 (Alpha韧性)。正数代表跑赢大盘，负数代表跟跌不跟涨
+                df['RS_10'] = df['Close'].pct_change(10) - df['BM_Close'].pct_change(10)
+                
+                # 特征B: 20日滚动相关性 (共振度)。判断该股是随波逐流还是走独立逻辑
+                df['Corr_20'] = df['Close'].rolling(20).corr(df['BM_Close']).fillna(0)
+                
+                # 特征C: 大盘乖离率 (宏观水位)。让树模型学会“覆巢之下无完卵”
+                df['BM_MA20'] = df['BM_Close'].rolling(20).mean()
+                df['BM_Bias'] = (df['BM_Close'] - df['BM_MA20']) / (df['BM_MA20'] + 1e-6)
+                
+                feats.extend(['RS_10', 'Corr_20', 'BM_Bias'])
+        
+        # 兜底机制：若网络抖动导致大盘数据确实，以 0 填充防报错
+        for f in ['RS_10', 'Corr_20', 'BM_Bias']:
+            if f not in df.columns:
+                df[f] = 0.0
+                if f not in feats: feats.append(f)
+        # ==============================================================
+
         # 3. 智能检测：杠杆资产及 ETF 特殊过滤单元
+        # (保留你原有的过滤逻辑...)
         is_etf = ticker.startswith(('51', '56', '58', '15', '16')) or "ETF" in stock_name
         is_leveraged = "杠杆" in stock_name or "两倍" in stock_name or "3倍" in stock_name or ticker.startswith('150')
         
@@ -177,15 +199,15 @@ def diagnostic_core(ticker, market_env, name_map):
 
         # 4. 机器学习模型层
         df['Target'] = (df['High'].shift(-5).rolling(5).max() > df['Close'] + (df['ATR'] * 1.5)).astype(int)
-        feats = ['Vol_Ratio', 'Bias', 'RSI', 'ATR_Pct']
-        train = df.iloc[:-1][feats + ['Target']].dropna()
+        
+        # 注意：这里直接使用上面动态生成的 feats 列表
+        train = df.iloc[:-1][feats + ['Target']].dropna() 
         
         rf = RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42)
-        # [逻辑修正] dropna 已经剔除了末尾缺失标签的数据，切片移除 `.iloc[:-5]` 避免误删最近有效训练集
         rf.fit(train[feats].values, train['Target'].values)
         
         latest_feats = df[feats].iloc[[-1]].values
-        if np.isnan(latest_feats).any(): return None # 数据流防线拦截异常源
+        if np.isnan(latest_feats).any(): return None 
         
         base_win_p = float(rf.predict_proba(latest_feats)[0][1])
 
@@ -256,7 +278,7 @@ def diagnostic_core(ticker, market_env, name_map):
 
 # --- 4. 境内多维大盘宏观环境风控矩阵 ---
 def get_mainland_market_env():
-    env_data = {'risk_weight': 1.0, 'status': "未知", 'details': {}}
+    env_data = {'risk_weight': 1.0, 'status': "未知", 'details': {}, 'index_df': None} # 新增 index_df 键
     try:
         indices = {
             '沪深300 (核心资产)': '000300.SS', 
@@ -265,17 +287,22 @@ def get_mainland_market_env():
             '中证500 (中盘标杆)': '000905.SS'
         }
         
+        # 【修改1】将 period="50d" 改为 "260d"，与个股特征工程的时间轴严格对齐
         m_data = yf.download(
             list(indices.values()),
-            period="50d",
+            period="260d",
             progress=False,
             timeout=15,
             threads=False
         )
         close_df = m_data['Close'] if isinstance(m_data.columns, pd.MultiIndex) else m_data
-            
+        
+        # 【修改2】将整张大盘数据表压入字典，供下游模型提取
+        env_data['index_df'] = close_df
+        
         up_counts = 0
         total_weight = 0
+        # ...(保留原有的大盘胜率判断逻辑不变)
         
         for name, ticker in indices.items():
             if ticker in close_df.columns:
@@ -348,7 +375,7 @@ with st.sidebar:
         <b style="color: #00ffaa; font-size: 0.95rem;">🔬 核心量化算法 (Core Quant Logic)</b><br>
         <ol style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.6;">
             <li><b>自适应期望值 (Adaptive EV)：</b>利用 14 日平均真实波幅 (ATR) 动态推演盈亏比空间，取代传统固定比例风控。</li>
-            <li><b>多特征收敛 (RF Convergence)：</b>集成【量比 Volume Ratio】、【均线乖离 Bias】、【相对强弱 RSI】以及【历史波动率 ATR_Pct】作为特征向量，交叉校准未来 5 交易日的破位或突破概率。</li>
+            <li><b>多维特征与宏观共振 (Macro Resonance)：</b>除基础量价特征外，全新注入<b>【超额强弱 RS】、【大盘相关性 Corr】与【基准水位 BM_Bias】</b>，让模型精准剥离“随波逐流”的伪突破，识别真正的独立阿尔法。</li>
             <li><b>高频形态修正 (Intraday Correction)：</b>深度解构日内 K 线结构，基于盘中长上影线冲高回落幅度及尾盘异动对基础胜率进行动态 alpha 纠偏。</li>
         </ol>
     </div>
