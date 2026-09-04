@@ -14,18 +14,18 @@ st.set_page_config(page_title="SENTINEL A-SHARE DUAL-ENGINE V26", layout="wide")
 
 # --- 1. 赛博朋克专属尊享级 UI 样式表 ---
 def get_v26_css():
-    return """
-    <style>
-        .main-header { background: linear-gradient(135deg, #0f0f14 0%, #5a0000 100%); color: #ffd700; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 25px; border: 1px solid #ffd700; box-shadow: 0 4px 15px rgba(255,215,0,0.1); }
-        .env-card { background: #0e1117; color: #ffd700; border: 1px solid #444; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-        .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 15px; }
-        .stat-box { background: #161a22; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #333; }
-        .sidebar-box { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #800000; margin-bottom: 15px; color: #222; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-        .u-tips { font-size: 0.85rem; color: #444; line-height: 1.6; list-style-type: square; padding-left: 15px; }
-        .stButton>button { width: 100%; border-radius: 8px; background: #800000; color: white; border: none; transition: 0.3s; font-weight: bold;}
-        .stButton>button:hover { background: #ffd700; color: #000; box-shadow: 0 0 10px rgba(255,215,0,0.5); }
-    </style>
-    """
+    return """
+    <style>
+        .main-header { background: linear-gradient(135deg, #0f0f14 0%, #5a0000 100%); color: #ffd700; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 25px; border: 1px solid #ffd700; box-shadow: 0 4px 15px rgba(255,215,0,0.1); }
+        .env-card { background: #0e1117; color: #ffd700; border: 1px solid #444; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 15px; }
+        .stat-box { background: #161a22; padding: 15px; border-radius: 10px; text-align: center; border: 1px solid #333; }
+        .sidebar-box { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #800000; margin-bottom: 15px; color: #222; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .u-tips { font-size: 0.85rem; color: #444; line-height: 1.6; list-style-type: square; padding-left: 15px; }
+        .stButton>button { width: 100%; border-radius: 8px; background: #800000; color: white; border: none; transition: 0.3s; font-weight: bold;}
+        .stButton>button:hover { background: #ffd700; color: #000; box-shadow: 0 0 10px rgba(255,215,0,0.5); }
+    </style>
+    """
 
 # --- 2. 境内代码规范化辅助工具 ---
 def normalize_a_share_code(raw_input):
