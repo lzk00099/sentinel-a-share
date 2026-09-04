@@ -375,6 +375,7 @@ with st.sidebar:
         <b style="color: #00ffaa; font-size: 0.95rem;">🔬 核心量化算法 (Core Quant Logic)</b><br>
         <ol style="font-size: 0.8rem; margin-top: 6px; padding-left: 15px; color: #b4c6d8; line-height: 1.6;">
             <li><b>自适应期望值 (Adaptive EV)：</b>利用 14 日平均真实波幅 (ATR) 动态推演盈亏比空间，取代传统固定比例风控。</li>
+            <li><b>多特征收敛 (RF Convergence)：</b>集成【量比 Volume Ratio】、【均线乖离 Bias】、【相对强弱 RSI】以及【历史波动率 ATR_Pct】作为特征向量，交叉校准未来 5 交易日的破位或突破概率。</li>
             <li><b>多维特征与宏观共振 (Macro Resonance)：</b>除基础量价特征外，全新注入<b>【超额强弱 RS】、【大盘相关性 Corr】与【基准水位 BM_Bias】</b>，让模型精准剥离“随波逐流”的伪突破，识别真正的独立阿尔法。</li>
             <li><b>高频形态修正 (Intraday Correction)：</b>深度解构日内 K 线结构，基于盘中长上影线冲高回落幅度及尾盘异动对基础胜率进行动态 alpha 纠偏。</li>
         </ol>
