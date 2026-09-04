@@ -179,23 +179,35 @@ def diagnostic_core(ticker, market_env, name_map):
         
         index_df = market_env.get('index_df')
         if index_df is not None and not index_df.empty:
-            bm_ticker = '000300.SS' # 以沪深300作为基准水位锚点
+            bm_ticker = '000300.SS'
             if bm_ticker in index_df.columns:
-                # 按日期左连接大盘数据，并前向填充防止节假日错位
-                df = df.join(index_df[[bm_ticker]].rename(columns={bm_ticker: 'BM_Close'}), how='left')
-                df['BM_Close'] = df['BM_Close'].ffill()
+                # 【关键修复1】标准化时间索引：剥离时区信息，纯按“年-月-日”对齐，防止 join 出错
+                df.index = pd.to_datetime(df.index).normalize().tz_localize(None)
                 
-                # 特征A: 10日相对强弱 (Alpha韧性)。正数代表跑赢大盘，负数代表跟跌不跟涨
-                df['RS_10'] = df['Close'].pct_change(10) - df['BM_Close'].pct_change(10)
+                idx_df = index_df[[bm_ticker]].copy()
+                idx_df.index = pd.to_datetime(idx_df.index).normalize().tz_localize(None)
                 
-                # 特征B: 20日滚动相关性 (共振度)。判断该股是随波逐流还是走独立逻辑
-                df['Corr_20'] = df['Close'].rolling(20).corr(df['BM_Close']).fillna(0)
+                # 【关键修复2】左连接大盘数据，并使用 ffill 和 bfill 双向填充防止节假日错位断层
+                df = df.join(idx_df.rename(columns={bm_ticker: 'BM_Close'}), how='left')
+                df['BM_Close'] = df['BM_Close'].ffill().bfill()
                 
-                # 特征C: 大盘乖离率 (宏观水位)。让树模型学会“覆巢之下无完卵”
-                df['BM_MA20'] = df['BM_Close'].rolling(20).mean()
-                df['BM_Bias'] = (df['BM_Close'] - df['BM_MA20']) / (df['BM_MA20'] + 1e-6)
-                
-                feats.extend(['RS_10', 'Corr_20', 'BM_Bias'])
+                # 只有在非全部为空的情况下才计算特征，避免除以 NaN
+                if not df['BM_Close'].isna().all():
+                    df['RS_10'] = df['Close'].pct_change(10) - df['BM_Close'].pct_change(10)
+                    df['Corr_20'] = df['Close'].rolling(20).corr(df['BM_Close']).fillna(0)
+                    
+                    df['BM_MA20'] = df['BM_Close'].rolling(20).mean()
+                    df['BM_Bias'] = (df['BM_Close'] - df['BM_MA20']) / (df['BM_MA20'] + 1e-6)
+                    
+                    feats.extend(['RS_10', 'Corr_20', 'BM_Bias'])
+        
+        # 【关键修复3】兜底机制：一旦拼接失败或无数据，主动赋 0，绝对不能留 NaN 给后面的 dropna()
+        for f in ['RS_10', 'Corr_20', 'BM_Bias']:
+            if f not in df.columns:
+                df[f] = 0.0
+            if f not in feats: 
+                feats.append(f)
+        # ==============================================================
         
         # 兜底机制：若网络抖动导致大盘数据确实，以 0 填充防报错
         for f in ['RS_10', 'Corr_20', 'BM_Bias']:
