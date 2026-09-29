@@ -2,32 +2,26 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import logging
-import time
 
 import pandas as pd
 import streamlit as st
 
 from analysis_engine import AnalysisError, analyze, completed_bars
-from app_services import clear_data_cache, get_constituents, get_history
+from app_services import clear_data_cache, get_constituents, get_history, get_index_history
 from market_data import DataError, INDICES, now_cn, parse_codes
+from ui_components import (ranked_frame, render_header, render_leaders, render_market,
+                           render_sidebar_guide, styled_ranking)
 
 LOG = logging.getLogger(__name__)
-st.set_page_config(page_title="SENTINEL · A股观察台", page_icon="📊", layout="wide")
-st.markdown("""<style>
-.block-container {max-width:1500px;padding-top:2rem;}
-.sentinel-hero {padding:24px 28px;border:1px solid #7c632c;border-radius:16px;
- background:linear-gradient(120deg,#171b28,#36221c);margin-bottom:24px;color:#faf8f0;}
-.sentinel-hero h1 {font-size:2rem;margin:0 0 8px;color:#e9c87d;}
-.sentinel-hero p {margin:0;color:#c1c7d5;}
-</style>""", unsafe_allow_html=True)
-st.markdown("""<div class="sentinel-hero"><h1>SENTINEL · A股观察台</h1>
-<p>行情有来源，结果有日期，异常可追溯。</p></div>""", unsafe_allow_html=True)
+st.set_page_config(page_title="SENTINEL A-SHARE ADVANCED V27", page_icon="🛡️", layout="wide")
+render_header()
 
 
 def safe_fetch(args):
     ticker, kind, provider = args
     try:
-        return ticker, get_history(ticker, kind, provider), None
+        data = get_index_history(ticker, provider) if kind == "index" else get_history(ticker, kind, provider)
+        return ticker, data, None
     except DataError as error:
         return ticker, None, str(error)
     except Exception as error:
@@ -43,7 +37,7 @@ def market_environment(provider):
                 errors.append({"代码": ticker, "阶段": "指数读取", "原因": error})
             else:
                 history[ticker] = data
-    details, positive = [], 0
+    details, positive, series = [], 0, {}
     benchmark = None
     for ticker, item in history.items():
         bars = completed_bars(item.frame)
@@ -52,13 +46,19 @@ def market_environment(provider):
             continue
         if ticker == "000300.SS":
             benchmark = bars
+        series[INDICES[ticker]] = bars["Close"].tail(120)
         close = float(bars["Close"].iloc[-1])
         ma20 = float(bars["Close"].tail(20).mean())
         above = close > ma20
         positive += (2 if ticker in ("000300.SS", "000001.SS") else 1) * above
-        details.append({"指数": INDICES[ticker], "收盘": close, "MA20": ma20,
+        latest = float(item.frame["Close"].iloc[-1])
+        daily_change = (latest / float(item.frame["Close"].iloc[-2]) - 1) * 100
+        details.append({"代码": ticker, "指数": INDICES[ticker], "收盘": close, "MA20": ma20,
                         "趋势": "高于 MA20" if above else "低于 MA20",
-                        "日期": str(bars.index[-1].date()), "来源": item.source})
+                        "日期": str(bars.index[-1].date()), "来源": item.source,
+                        "点位": latest, "涨跌幅(%)": daily_change,
+                        "行情日期": str(item.frame.index[-1].date()),
+                        "抓取时间": item.fetched_at, "走势": bars["Close"].tail(30).tolist()})
     weight, status = 1.0, "四指数未齐全，环境调整停用（乘数 1.0）"
     if len(details) == 4 and len({row["日期"] for row in details}) == 1:
         ratio = positive / 6
@@ -67,18 +67,24 @@ def market_environment(provider):
     elif len(details) == 4:
         status = "指数日期不一致，环境调整停用（乘数 1.0）"
     return {"details": details, "errors": errors, "weight": weight, "status": status,
-            "benchmark": benchmark}
+            "benchmark": benchmark, "chart": pd.concat(series, axis=1) if series else pd.DataFrame(),
+            "checked_at": now_cn().strftime("%Y-%m-%d %H:%M:%S %Z"), "provider": provider}
 
 
-def run_report(tickers, provider, previous=None):
-    started = time.monotonic()
+def run_report(tickers, provider, previous=None, report_key=None):
+    tickers = list(dict.fromkeys(tickers))
     report = previous or {"rows": [], "errors": [], "histories": {}, "total": len(tickers),
-                          "created": now_cn().strftime("%Y-%m-%d %H:%M:%S %Z"), "provider": provider}
+                          "created": now_cn().strftime("%Y-%m-%d %H:%M:%S %Z"), "provider": provider,
+                          "checked": []}
+    report["pending"] = list(tickers)
+    report["updated"] = now_cn().strftime("%Y-%m-%d %H:%M:%S %Z")
+    if report_key:
+        st.session_state[report_key] = report
     with st.spinner("读取并核对四个基准指数…"):
         env = report.get("environment") or market_environment(provider)
     report["environment"] = env
     progress = st.progress(0, text="准备读取个股行情")
-    pending, failures, processed = [], 0, 0
+    failures, processed = 0, 0
     with ThreadPoolExecutor(max_workers=3) as pool:
         for offset in range(0, len(tickers), 3):
             batch = tickers[offset:offset + 3]
@@ -98,13 +104,19 @@ def run_report(tickers, provider, previous=None):
                         LOG.exception("Unexpected model failure for %s", ticker)
                         report["errors"].append({"代码": ticker, "阶段": "模型计算",
                                                  "原因": f"{type(error).__name__}: {str(error)[:160]}"})
-                progress.progress(processed / len(tickers), text=f"本轮已检查 {processed}/{len(tickers)} · {ticker}")
-            if failures >= 6 or time.monotonic() - started >= 180:
-                pending = tickers[offset + len(batch):]
-                if pending:
-                    st.warning(f"本轮已保存结果，尚有 {len(pending)} 只待检查。可点击下方“继续扫描”。")
+                if ticker not in report.setdefault("checked", []):
+                    report["checked"].append(ticker)
+                report["pending"] = tickers[processed:]
+                report["updated"] = now_cn().strftime("%Y-%m-%d %H:%M:%S %Z")
+                if report_key:
+                    st.session_state[report_key] = report
+                done = len(report["checked"])
+                progress.progress(done / report["total"], text=f"已检查 {done}/{report['total']} · 已评分 {len(report['rows'])} · {ticker}")
+            # Isolated failures do not shrink the universe. Only a sustained outage pauses it.
+            if failures >= 6:
+                if report["pending"]:
+                    st.warning(f"连续6只读取失败，已保存进度。尚有 {len(report['pending'])} 只待检查，可点击“继续扫描”。")
                 break
-    report["pending"] = pending
     report["updated"] = now_cn().strftime("%Y-%m-%d %H:%M:%S %Z")
     progress.empty()
     return report
@@ -115,22 +127,38 @@ def render_report(report, key):
     st.caption(f"本次结果生成：{report['updated']} · 请求设置：{report['provider']} · 缓存最长 10 分钟")
     cols = st.columns(4)
     cols[0].metric("计划标的", report["total"])
-    cols[1].metric("取得行情", len(report["histories"]))
+    cols[1].metric("已检查", len(report.get("checked", report["histories"])))
     cols[2].metric("完成评分", len(report["rows"]))
     cols[3].metric("待继续", len(report["pending"]))
-    with st.expander("查看市场环境", expanded=False):
+    with st.expander("本次评分使用的市场环境快照", expanded=False):
         st.write(f"{env['status']} · 评分乘数 {env['weight']:.2f}")
         if env["details"]:
-            st.dataframe(pd.DataFrame(env["details"]), hide_index=True, width="stretch")
+            snapshot = pd.DataFrame(env["details"]).drop(columns=["走势"], errors="ignore")
+            st.dataframe(snapshot, hide_index=True, width="stretch")
         if env["errors"]:
             st.dataframe(pd.DataFrame(env["errors"]), hide_index=True, width="stretch")
     if report["rows"]:
-        frame = pd.DataFrame(report["rows"]).sort_values("综合评分", ascending=False)
+        frame = ranked_frame(report["rows"])
+        is_scan = key == "scan_report"
+        if is_scan:
+            if report["pending"]:
+                st.warning(f"暂定排名：尚有 {len(report['pending'])} 只未检查，当前榜单只包含已完成评分的标的。")
+            else:
+                st.success(f"全名单检查完成：{report['total']}/{report['total']}；{len(frame)} 只成功评分并排名，{len(report['errors'])} 只存在异常。")
+            render_leaders(frame)
+            selection = st.radio("排名显示范围", ["全部排名", "前20名", "前50名"], horizontal=True, key=f"ranking_view_{key}")
+            display = frame if selection == "全部排名" else frame.head(20 if selection == "前20名" else 50)
+            st.caption(f"共 {len(frame)} 只可排名 · 当前显示 {len(display)} 只。名次基于完整已评分集合，默认按综合评分降序；点击表头可临时换序。")
+        else:
+            display = frame
         configs = {column: st.column_config.NumberColumn(format="%.2f%%")
                    for column in frame.columns if column.endswith("(%)")}
-        st.dataframe(frame, hide_index=True, width="stretch", column_config=configs)
-        st.download_button("下载本次诊断 CSV", frame.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="sentinel_results.csv", mime="text/csv", key=f"export_{key}")
+        st.dataframe(styled_ranking(display), hide_index=True, width="stretch", column_config=configs,
+                     height=min(760, max(180, (len(display) + 1) * 35)))
+        st.download_button("下载全部排名 CSV" if is_scan else "下载本次诊断 CSV",
+                           frame.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="hs300_full_ranking.csv" if is_scan else "sentinel_results.csv",
+                           mime="text/csv", key=f"export_{key}")
     else:
         st.error("本次没有可评分结果。下方列出了具体原因；非交易时段仍应可以读取历史日线。")
     if report["histories"]:
@@ -149,26 +177,44 @@ def render_report(report, key):
             st.download_button("下载异常记录", errors.to_csv(index=False).encode("utf-8-sig"),
                                "sentinel_errors.csv", "text/csv", key=f"errors_{key}")
     if report["pending"] and st.button("继续扫描", key=f"continue_{key}"):
-        st.session_state[key] = run_report(report["pending"], report["provider"], report)
+        st.session_state[key] = run_report(report["pending"], report["provider"], report, report_key=key)
+        st.rerun()
+    if report["errors"] and not report["pending"] and st.button("重试失败标的", key=f"retry_{key}"):
+        retry_codes = list(dict.fromkeys(row["代码"] for row in report["errors"]))
+        report["errors"] = []
+        st.session_state[key] = run_report(retry_codes, report["provider"], report, report_key=key)
         st.rerun()
 
 
 with st.sidebar:
-    st.subheader("数据与运行")
+    st.subheader("🧬 SENTINEL 决策面板")
     provider = st.selectbox("行情源", ["自动切换", "腾讯", "东方财富"])
     st.caption("自动模式先读取腾讯，失败后尝试东方财富。只缓存成功响应。")
     if st.button("清除行情缓存", width="stretch"):
         clear_data_cache()
         st.success("已清除缓存；下次诊断将重新读取。已有报告保留原始时间。")
-    st.divider()
-    st.markdown("**日线观察规则**")
-    st.write("支持沪深 A 股及常见场内基金。评分使用完整日线；北京时间 15:15 前排除当日未收盘日线。")
-    st.write("突破概率是未校准的模型输出。参考位和盈亏分值用于比较，不代表已验证胜率或可实现收益。")
-    st.caption("启动页面不会请求全市场股票字典。名称随行情返回，降低首次加载耗时。")
+    render_sidebar_guide()
+
+
+@st.fragment(run_every="60s")
+def market_tracker(provider):
+    title, action = st.columns([5, 1])
+    title.subheader("🇨🇳 境内四指数 · 大盘追踪")
+    if action.button("刷新大盘", width="stretch"):
+        get_index_history.clear()
+    with st.spinner("正在读取大盘快照…"):
+        environment = market_environment(provider)
+    st.session_state["tracking_environment"] = environment
+    render_market(environment)
+    st.caption(f"页面打开时约每60秒自动刷新 · 本次检查 {environment['checked_at']} · 点位为日线接口最新快照，数据可能延迟。")
+
+
+market_tracker(provider)
 
 single, scan, help_tab = st.tabs(["单股诊断", "沪深300扫描", "数据说明"])
 with single:
-    st.subheader("输入代码，检查行情与信号")
+    st.subheader("🔍 A股单股精准诊断")
+    st.markdown('<div class="guide-banner"><b>单股深度观察</b> · 输入最多5个股票或场内基金代码，查看突破概率、波动参考位与风险提示。<br>请同时核对<b>行情日期</b>与<b>评分日期</b>；盘中价格快照可能比用于评分的完整日线更新。</div>', unsafe_allow_html=True)
     with st.form("single_form"):
         text = st.text_input("股票／基金代码（最多 5 只）", "000807 002463 600183 002384 000630",
                              help="支持 600519、600519.SH、sh600519、000001.SZ；可用中英文逗号或空格分隔。")
@@ -180,23 +226,23 @@ with single:
         if len(codes) > 5:
             st.warning("本次处理前 5 个唯一代码。")
         if codes:
-            st.session_state["single_report"] = run_report(codes[:5], provider)
+            st.session_state["single_report"] = run_report(codes[:5], provider, report_key="single_report")
         else:
             st.error("请输入有效的沪深 A 股／场内基金代码。")
     if "single_report" in st.session_state:
         render_report(st.session_state["single_report"], "single_report")
 
 with scan:
-    st.subheader("核验成分名单后再扫描")
-    st.caption("成分名单必须包含 300 只唯一股票。接口失败时会明确停止，不会用少数示例股票冒充完整名单。")
-    limit = st.selectbox("本次扫描数量", [30, 100, 300], help="按代码排序选择；30 只用于先检查接口，并非 Top 30 推荐。")
+    st.subheader("🏆 沪深300 · 全量扫描与综合排名")
+    st.markdown('<div class="guide-banner"><b>扫描范围：完整300只成分股</b> · 一次启动，逐只读取与建模，按综合评分统一排名。<br>榜单默认展示<b>全部排名</b>，也可切换前20／50名；显示范围不会改变实际扫描数量。</div>', unsafe_allow_html=True)
+    st.caption("开始前校验300只唯一成分股。一般需要数分钟，页面会持续更新进度；个别失败会记录原因并继续其他股票。")
     if st.button("开始沪深300扫描", type="primary"):
         try:
             with st.spinner("获取并校验成分股名单…"):
                 constituents = get_constituents()
-            codes = constituents["frame"].sort_values("代码")["代码"].head(limit).tolist()
+            codes = constituents["frame"].sort_values("代码")["代码"].tolist()
             st.session_state["scan_metadata"] = constituents
-            st.session_state["scan_report"] = run_report(codes, provider)
+            st.session_state["scan_report"] = run_report(codes, provider, report_key="scan_report")
         except DataError as error:
             st.error(str(error))
         except Exception as error:
@@ -223,5 +269,15 @@ with help_tab:
 
 先查看异常记录中的来源、阶段及原因；可清除缓存后重试，或选择另一行情源。
 HTTP 429 通常表示限流，连接超时可能与云服务器网络有关。免费公开接口的可用性需要在实际部署环境核验。
-扫描每轮最多运行约 3 分钟（会等待当前批次完成），结果保留后可继续；连续 6 只读取失败则提前停止本轮。
+全量扫描会持续处理全部300只，不再按30只或3分钟自动截断。仅连续6只读取失败时暂停，保留进度后可继续；结束后可重试失败标的。
+
+**排名与显示范围**
+
+默认对全部成功评分的股票按综合评分降序排名，同分按代码排序。前20／50名只影响榜单展示，不影响扫描范围或CSV导出。
+若存在失败标的，完整报告会同时显示已检查数量、可排名数量和异常明细；尚未检查完的榜单明确标为暂定排名。
+
+**四指数大盘追踪**
+
+首页始终展示沪深300、上证指数、创业板指和中证500。点位与日涨跌使用最新日线快照；MA20状态和模型环境权重使用完整日线。
+大盘刷新不会重跑个股模型。每份诊断报告保留当时用于评分的市场快照，便于复查。
 """)

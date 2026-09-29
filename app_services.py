@@ -14,6 +14,12 @@ def get_constituents():
     return load_constituents()
 
 
+@st.cache_data(ttl=60, max_entries=16, show_spinner=False)
+def get_index_history(ticker, provider="自动切换"):
+    return load_history(ticker, "index", provider)
+
+
 def clear_data_cache():
     get_history.clear()
     get_constituents.clear()
+    get_index_history.clear()
