@@ -1,5 +1,6 @@
 """Presentation components for the red-and-gold SENTINEL dashboard."""
 from html import escape
+from math import isfinite
 
 import pandas as pd
 import streamlit as st
@@ -157,13 +158,37 @@ def render_leaders(frame):
     st.markdown('<div class="leader-grid">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
 
 
-def styled_ranking(frame):
+PROBABILITY_COLUMNS = {"模型突破概率(%)", "形态修正值(%)"}
+
+
+def _metric_color(value, *, scale=1.0, probability=False):
+    if pd.isna(value) or not isfinite(float(value)):
+        return ""
+    # A-share convention: positive/high is red, negative/low is green.
+    # Solid hex fills avoid alpha blending against the dataframe's own theme.
+    position = (float(value) - 50) / 50 if probability else float(value) / scale
+    strength = min(abs(position), 1.0) ** 0.55
+    neutral = (37, 44, 58)
+    endpoint = (159, 36, 69) if position > 0 else (8, 104, 79)
+    rgb = tuple(round(start + (end - start) * strength) for start, end in zip(neutral, endpoint))
+    background = "#" + "".join(f"{channel:02x}" for channel in rgb)
+    return f"background-color: {background}; color: #f9fafb; font-weight: 600;"
+
+
+def styled_ranking(frame, reference=None):
+    # Keep the same color scale when the user switches to the top 20/50 rows.
+    reference = frame if reference is None else reference
     formats = {column: "{:+.2f}%" for column in frame if column.endswith("(%)")}
+    formats.update({column: "{:.2f}%" for column in PROBABILITY_COLUMNS if column in frame})
     formats.update({"综合评分": "{:.3f}", "最近价": "{:.3f}", "评分基准价": "{:.3f}",
                     "上方参考位": "{:.3f}", "下方参考位": "{:.3f}"})
-    scores = frame["综合评分"]
-    lower, spread = scores.min(), scores.max() - scores.min() or 1
-    def shade(value):
-        opacity = 0.10 + 0.22 * (value - lower) / spread
-        return f"background-color: rgba(211,169,78,{opacity:.2f}); color: #f6dfa2; font-weight: 700;"
-    return frame.style.format({k: v for k, v in formats.items() if k in frame}).map(shade, subset=["综合评分"])
+    styled = frame.style.format({k: v for k, v in formats.items() if k in frame}, na_rep="—")
+    for column in frame:
+        if column != "综合评分" and not column.endswith("(%)"):
+            continue
+        values = pd.to_numeric(reference[column], errors="coerce").replace([float("inf"), -float("inf")], float("nan"))
+        scale = values.abs().max()
+        scale = float(scale) if pd.notna(scale) and scale > 0 else 1.0
+        styled = styled.map(_metric_color, subset=[column], scale=scale,
+                            probability=column in PROBABILITY_COLUMNS)
+    return styled

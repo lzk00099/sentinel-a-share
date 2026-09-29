@@ -9,7 +9,7 @@ import streamlit as st
 from analysis_engine import AnalysisError, analyze, completed_bars
 from app_services import clear_data_cache, get_constituents, get_history, get_index_history
 from market_data import DataError, INDICES, now_cn, parse_codes
-from ui_components import (ranked_frame, render_header, render_leaders, render_market,
+from ui_components import (PROBABILITY_COLUMNS, ranked_frame, render_header, render_leaders, render_market,
                            render_sidebar_guide, styled_ranking)
 
 LOG = logging.getLogger(__name__)
@@ -151,9 +151,10 @@ def render_report(report, key):
             st.caption(f"共 {len(frame)} 只可排名 · 当前显示 {len(display)} 只。名次基于完整已评分集合，默认按综合评分降序；点击表头可临时换序。")
         else:
             display = frame
-        configs = {column: st.column_config.NumberColumn(format="%.2f%%")
+        st.caption("配色：综合评分／涨跌／EV（启发式盈亏分值）正红负绿、零值为灰蓝；概率／形态修正值以50%为色标中点，低绿高红。色深表示偏离程度，各列独立着色，不代表确定收益。")
+        configs = {column: st.column_config.NumberColumn(format="%.2f%%" if column in PROBABILITY_COLUMNS else "%+.2f%%")
                    for column in frame.columns if column.endswith("(%)")}
-        st.dataframe(styled_ranking(display), hide_index=True, width="stretch", column_config=configs,
+        st.dataframe(styled_ranking(display, reference=frame), hide_index=True, width="stretch", column_config=configs,
                      height=min(760, max(180, (len(display) + 1) * 35)))
         st.download_button("下载全部排名 CSV" if is_scan else "下载本次诊断 CSV",
                            frame.to_csv(index=False).encode("utf-8-sig"),
