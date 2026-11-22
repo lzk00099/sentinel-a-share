@@ -59,9 +59,9 @@ button[aria-selected="true"][data-baseweb="tab"] {color:#f0cc7e;}
 def render_header():
     st.markdown(CSS, unsafe_allow_html=True)
     st.markdown("""<div class="main-header"><div class="eyebrow">SENTINEL / MAINLAND EQUITY INTELLIGENCE</div>
-<h1>🛡 SENTINEL A-SHARE ADVANCED <span style="font-size:.55em;color:#c8a973">V27</span></h1>
-<p>A 股多周期量化观察台 · 大盘共振追踪 · 沪深300全量排名</p>
-<div class="hero-chips"><span>四指数环境追踪</span><span>300只完整扫描</span><span>随机森林 × 量价特征</span><span>双源行情自动切换</span></div></div>""", unsafe_allow_html=True)
+<h1>🛡 SENTINEL A-SHARE ADVANCED <span style="font-size:.55em;color:#c8a973">V28</span></h1>
+<p>A 股多周期量化观察台 · 大盘共振追踪 · 缠论与背离信号</p>
+<div class="hero-chips"><span>四指数环境追踪</span><span>300只完整扫描</span><span>随机森林 × 量价特征</span><span>缠论K线与信号扫描</span><span>双源行情自动切换</span></div></div>""", unsafe_allow_html=True)
 
 
 def render_sidebar_guide():
@@ -88,7 +88,11 @@ def render_sidebar_guide():
 <li>先看四个指数的涨跌、MA20位置与环境权重。</li>
 <li>点击全量扫描，等待300只检查结束；结果按综合评分排名。</li>
 <li>用单股诊断复查目标；展开日线图核对趋势、日期与来源。</li>
+<li>在“缠论图表与扫描”查看个股中枢、笔线、结构买卖点、海底捞月和CD+RSI。</li>
+<li>需要筛选时运行沪深300近期买点扫描；下载结果并查看未完成标的。</li>
 <li>下载完整排名或异常记录。网络连续失败时可继续剩余标的或重试失败项。</li></ol></div>
+<div class="side-card" style="--accent:#e9a2c7"><h4>🧭 缠论与背离观察</h4>
+缠论结构图使用同一套腾讯／东方财富A股前复权日线。买卖点、海底捞月和CD+RSI是规则近似信号；包含K线确认延迟，不代表最终底部或未来收益。沪深300扫描检查最近3根完整日线，网络失败与日线不足会列入异常。</div>
 """, unsafe_allow_html=True)
 
 

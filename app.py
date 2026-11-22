@@ -8,12 +8,16 @@ import streamlit as st
 
 from analysis_engine import AnalysisError, analyze, completed_bars
 from app_services import clear_data_cache, get_constituents, get_history, get_index_history
+from chan_addons import cd_rsi_signals, sea_bottom_moon
+from chan_engine import (AUTO_PRESETS, add_indicators, build_centers, build_pivots,
+                         build_segments, first_second_signals, plot_chart, recent_primary_buys,
+                         third_signals, unique_levels)
 from market_data import DataError, INDICES, now_cn, parse_codes
 from ui_components import (PROBABILITY_COLUMNS, ranked_frame, render_header, render_leaders, render_market,
                            render_sidebar_guide, styled_ranking)
 
 LOG = logging.getLogger(__name__)
-st.set_page_config(page_title="SENTINEL A-SHARE ADVANCED V27", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="SENTINEL A-SHARE ADVANCED V28", page_icon="🛡️", layout="wide")
 render_header()
 
 
@@ -212,7 +216,7 @@ def market_tracker(provider):
 
 market_tracker(provider)
 
-single, scan, help_tab = st.tabs(["单股诊断", "沪深300扫描", "数据说明"])
+single, scan, chan_tab, help_tab = st.tabs(["单股诊断", "沪深300扫描", "缠论图表与扫描", "数据说明"])
 with single:
     st.subheader("🔍 A股单股精准诊断")
     st.markdown('<div class="guide-banner"><b>单股深度观察</b> · 输入最多5个股票或场内基金代码，查看突破概率、波动参考位与风险提示。<br>请同时核对<b>行情日期</b>与<b>评分日期</b>；盘中价格快照可能比用于评分的完整日线更新。</div>', unsafe_allow_html=True)
@@ -256,8 +260,163 @@ with scan:
             st.info(note)
         render_report(st.session_state["scan_report"], "scan_report")
 
+with chan_tab:
+    st.subheader("🧭 缠论结构 · 海底捞月 · CD+RSI")
+    st.markdown('<div class="guide-banner"><b>复用A股系统日线</b> · 查看缠论结构K线、海底捞月底部层级及CD+RSI背离；也可扫描沪深300近期买入信号。<br>所有结构与信号均为规则近似的研究提示，不是交易指令。</div>', unsafe_allow_html=True)
+    chart_col, action_col = st.columns([3, 1])
+    with chart_col:
+        chan_code_text = st.text_input("A股代码", "600519", key="chan_chart_code",
+                                       help="支持 600519、600519.SH、sh600519 等常见格式。")
+    with action_col:
+        st.write("")
+        st.write("")
+        show_chan = st.button("生成缠论图表", type="primary", key="show_chan_chart")
+    show_minor = st.checkbox("显示小级别结构笔", value=True, key="chan_show_minor")
+    show_segments = st.checkbox("显示简化线段", value=True, key="chan_show_segments")
+    if show_chan:
+        codes, invalid = parse_codes(chan_code_text)
+        if invalid:
+            st.warning("未识别的沪深 A 股代码：" + "、".join(invalid))
+        if codes:
+            try:
+                st.session_state["chan_history"] = (codes[0], get_history(codes[0], "stock", provider))
+            except DataError as error:
+                st.error(f"行情读取失败：{error}")
+    if "chan_history" in st.session_state:
+        ticker, history = st.session_state["chan_history"]
+        entered_codes, _ = parse_codes(chan_code_text)
+        if entered_codes and ticker != entered_codes[0]:
+            st.info("点击“生成缠论图表”以读取当前输入代码。")
+        else:
+            preset = AUTO_PRESETS["1d"]
+            bars = completed_bars(history.frame).tail(320)
+            if len(bars) < 90:
+                st.warning(f"可用完整日线只有 {len(bars)} 根，结构识别建议至少 90 根。")
+            else:
+                data = add_indicators(bars)
+                minor = build_pivots(data, preset["radius"], preset["min_bars"])
+                major = build_pivots(data, preset["radius"] * preset["scale"], preset["min_bars"] * preset["scale"])
+                minor_centers, major_centers = build_centers(minor, "minor"), build_centers(major, "major")
+                centers = minor_centers + major_centers
+                segments = build_segments(minor)
+                signals = (first_second_signals(data, minor, preset["force"])
+                           + third_signals(minor, minor_centers, True)
+                           + third_signals(major, major_centers, True))
+                sea, cd = sea_bottom_moon(data, "1d"), cd_rsi_signals(data)
+                levels = unique_levels(data, centers, minor + major, preset["levels"])
+                st.caption(f"{history.name} · {ticker} · {history.source} · {history.adjustment} · 日线截至 {bars.index[-1].date()} · {len(bars)} 根完整K线")
+                for note in history.notes:
+                    st.info(note)
+                last_sea = sea.tier.dropna()
+                last_sea_label = last_sea.iloc[-1] if len(last_sea) and last_sea.index[-1] == sea.index[-1] else "无最新海底信号"
+                last_cd = "CD+RSI 底背离" if bool(cd.bottom.iloc[-1]) else ("CD+RSI 顶背离" if bool(cd.top.iloc[-1]) else "无最新CD+RSI信号")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("完整日线收盘", f"{bars.Close.iloc[-1]:.2f}")
+                m2.metric("当前缠论端点", len(minor))
+                m3.metric("海底捞月", str(last_sea_label))
+                m4.metric("CD+RSI", last_cd)
+                fig = plot_chart(data, minor, major, segments, centers, signals, levels,
+                                 sea, cd, show_minor, show_segments, preset["large_at"])
+                st.plotly_chart(fig, width="stretch", theme=None)
+                recent_signals = [{"日期": x.t, "信号": x.text, "价格": round(x.price, 3), "说明": x.confidence}
+                                  for x in sorted(signals, key=lambda x: x.i, reverse=True)[:30]]
+                center_rows = [{"级别": "大" if x.strokes >= preset["large_at"] else "小",
+                                "方向": "上行" if x.direction == "up" else "下行",
+                                "开始": data.index[x.start_i], "结束": data.index[x.end_i],
+                                "ZD": round(x.low, 3), "ZG": round(x.high, 3), "笔数": x.strokes}
+                               for x in sorted(centers, key=lambda c: c.end_i, reverse=True)[:30]]
+                left, right = st.columns(2)
+                with left:
+                    st.caption("近期结构买卖点（最多显示30条）")
+                    st.dataframe(pd.DataFrame(recent_signals), hide_index=True, width="stretch")
+                with right:
+                    st.caption("近期中枢（最多显示30条）")
+                    st.dataframe(pd.DataFrame(center_rows), hide_index=True, width="stretch")
+                with st.expander("查看指标日线明细"):
+                    details = bars.copy()
+                    details["RSI"] = cd["rsi"]
+                    details["海底Tide"] = sea["tide"]
+                    details["CD+RSI底背离"] = cd["bottom"]
+                    details["CD+RSI顶背离"] = cd["top"]
+                    st.dataframe(details.tail(40), width="stretch")
+
+    st.divider()
+    st.markdown("**沪深300近期买入信号扫描** · 检查最近3根完整日线中的缠论买点、海底捞月或 CD+RSI 底背离；多个信号同时出现时优先显示。")
+    if st.button("开始沪深300缠论扫描", type="primary", key="chan_scan_start"):
+        try:
+            constituents = get_constituents()
+            codes = constituents["frame"].sort_values("代码")["代码"].tolist()
+            results, errors = [], []
+            progress = st.progress(0, text="准备扫描沪深300缠论信号")
+            for offset in range(0, len(codes), 3):
+                batch = codes[offset:offset + 3]
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    fetched = list(pool.map(lambda code: safe_fetch((code, "stock", provider)), batch))
+                for code, item, error in fetched:
+                    if error:
+                        errors.append({"代码": code, "原因": error})
+                        continue
+                    try:
+                        bars = completed_bars(item.frame).tail(320)
+                        if len(bars) < 90:
+                            errors.append({"代码": code, "原因": f"完整日线不足90根：{len(bars)}"})
+                            continue
+                        preset = AUTO_PRESETS["1d"]
+                        data = add_indicators(bars)
+                        primary = recent_primary_buys(data, preset["radius"], preset["min_bars"],
+                                                      preset["scale"], preset["force"], True, 3)
+                        sea = sea_bottom_moon(data, "1d")
+                        cd = cd_rsi_signals(data)
+                        sea_hits = sea.tier.iloc[-3:].dropna().tolist()
+                        cd_bottom = bool(cd.bottom.iloc[-3:].any())
+                        count = int(bool(primary)) + int(bool(sea_hits)) + int(cd_bottom)
+                        if count:
+                            resonance = bool(primary) and (bool(sea_hits) or cd_bottom)
+                            results.append({"代码": code, "名称": item.name,
+                                "评分日收盘": round(float(bars.Close.iloc[-1]), 3), "日期": str(bars.index[-1].date()),
+                                "缠论买点": "、".join(primary) or "—",
+                                "海底捞月": "、".join(dict.fromkeys(sea_hits)) or "—",
+                                "CD+RSI底背离": "是" if cd_bottom else "—",
+                                "多指标共振": "是" if resonance else "—", "信号类别数": count,
+                                "_共振": int(resonance)})
+                    except Exception as error:
+                        errors.append({"代码": code, "原因": f"指标计算：{type(error).__name__}: {str(error)[:120]}"})
+                progress.progress(min(offset + len(batch), len(codes)) / len(codes),
+                                  text=f"已检查 {min(offset + len(batch), len(codes))}/{len(codes)}")
+            progress.empty()
+            results.sort(key=lambda row: (-row["_共振"], -row["信号类别数"], row["代码"]))
+            st.session_state["chan_scan_results"] = results
+            st.session_state["chan_scan_errors"] = errors
+            st.session_state["chan_scan_meta"] = constituents
+        except Exception as error:
+            st.error(f"缠论扫描未完成：{error}")
+    if "chan_scan_results" in st.session_state:
+        results = st.session_state["chan_scan_results"]
+        errors = st.session_state["chan_scan_errors"]
+        meta = st.session_state["chan_scan_meta"]
+        st.caption(f"名单来源：{meta['source']} · 日期：{meta['as_of']} · 共 {len(results)} 只出现近期买入信号；异常 {len(errors)} 只。")
+        if results:
+            frame = pd.DataFrame(results).drop(columns=["_共振"])
+            st.dataframe(frame, hide_index=True, width="stretch")
+            st.download_button("下载缠论信号 CSV", frame.to_csv(index=False).encode("utf-8-sig"),
+                               "hs300_chan_signals.csv", "text/csv", key="chan_scan_download")
+        else:
+            st.info("本次扫描范围内没有符合近期买入信号条件的标的。")
+        if errors:
+            with st.expander(f"查看 {len(errors)} 只未完成的扫描标的"):
+                st.dataframe(pd.DataFrame(errors), hide_index=True, width="stretch")
+
 with help_tab:
     st.markdown("""
+**缠论图表与信号扫描**
+
+- 输入一个沪深 A 股代码，点击“生成缠论图表”。图表使用系统当前选中的腾讯／东方财富行情源及其完整日线。
+- 价格图包括大／小级别结构笔、中枢、简化线段、结构买卖点与近期支撑阻力；副图显示海底捞月 Tide 与 CD+RSI MACD 背离。
+- 结构买卖点是规则近似的候选信号。分型需要右侧K线确认，因此拐点与信号会延迟出现。
+- 点击“开始沪深300缠论扫描”，逐只检查完整成分股最近3根完整日线中的结构买点、海底捞月和 CD+RSI 底背离。多类信号同时出现的标的排在前面，可下载 CSV。
+- 扫描不为没有数据或不足90根完整日线的标的补造信号；失败原因可在异常清单中查看。行情仍可能延迟或受免费接口限流影响。
+- 指标用于观察和筛选，不构成交易指令，也没有经过独立样本外收益验证。
+
 **数据口径**
 
 - 最近价是日线接口的最新快照；行情日期与评分日期分别展示。

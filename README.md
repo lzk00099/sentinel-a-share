@@ -1,6 +1,8 @@
-# SENTINEL A-SHARE ADVANCED V27 · 全量排名版
+# SENTINEL A-SHARE ADVANCED V28 · A股诊断与缠论信号版
 
-基于用户提供的 `A_SHARE.txt` 完成重构，保留已修复的单股诊断，恢复红金深色界面、详细说明与四指数大盘追踪。沪深300扫描处理完整300只成分股，默认展示全部可评分股票的排名。
+在 V27 单股诊断、红金深色界面、四指数追踪和沪深300排名基础上，加入缠论结构K线、海底捞月、CD+RSI背离与沪深300近期买入信号扫描。新增指标继续使用本系统腾讯／东方财富日线行情，不再单独依赖 Yahoo Finance。
+
+缠论笔、中枢、简化线段及买卖点是可审阅的规则近似；海底捞月是 RSI／随机指标底部提示，CD+RSI移植了 CHANLUNAI 仓库的已确认背离逻辑。所有信号用于研究和筛选，不构成投资建议、确定底部或已验证胜率。
 
 2026-09-29 配色更新：综合评分、涨跌与EV（启发式盈亏分值）采用正红负绿、零值灰蓝的连续色阶；概率与形态修正值采用低绿高红、50%为中点的固定色阶。浅色数字配实色背景，切换全部／前20／前50名时保持同一色标。该更新只涉及页面显示，行情、模型与依赖不变。
 
@@ -8,7 +10,7 @@
 
 逐步部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。现有仓库推荐继续使用 `streamlit_app.py` 入口。
 
-1. 将本目录内容放入 **A 股项目**的 GitHub 仓库，同级保留 `app.py`、`market_data.py`、`analysis_engine.py`、`app_services.py`、新增的 `ui_components.py` 与 `requirements.txt`，同时上传 `.streamlit/config.toml`。不要只复制 `app.py`。
+1. 将本目录内容放入 **A 股项目**的 GitHub 仓库；所有 Python 模块与 `requirements.txt` 都放在仓库根目录，同时保留 `.streamlit/config.toml`。不要只复制入口文件。
 2. Streamlit Community Cloud 指向该仓库和对应分支，入口设置为 `streamlit_app.py`，Python 选择 **3.12**。
 3. 部署完成后先诊断 `600519 000001 510300`，核对最近价、数据源、行情日期和评分日期，再运行300股扫描。
 4. 现有 `lzk00099/sentinel-a-share` 仓库的 `streamlit_app.py` 与附件内容完全一致。本包保留 `streamlit_app.py` 和 `sentinel_a_share_v26_fixed.py` 两个兼容入口，原部署使用它们时无需改入口设置。完整复制本包代码与模块即可。
@@ -79,11 +81,21 @@ python -m pytest -q
 - `streamlit_app.py`、`sentinel_a_share_v26_fixed.py`：每次重运行都会执行新版页面的兼容入口。
 - `market_data.py`：输入规范化、HTTP请求、双源读取、行情与成分名单校验。
 - `analysis_engine.py`：完整日线、特征、训练标签和评分。
+- `chan_engine.py`、`chan_addons.py`：缠论结构识别、K线绘图、海底捞月与 CD+RSI 背离信号。
 - `app_services.py`：成功数据缓存。
 - `ui_components.py`：红金主题、四指数卡片、详细使用说明与全量排行榜。
 - `tests/`：数据读取、算法边界、页面交互的自动化测试。
 - `VALIDATION.md`：实际完成的验证与尚未验证的范围。
 - `DEPLOYMENT.md`：上传文件、Streamlit 配置与常见报错的处理步骤。
+
+## 缠论图表与扫描
+
+1. 打开“缠论图表与扫描”，输入沪深 A 股代码并点击“生成缠论图表”。
+2. 图表展示前复权日线、大小级别结构笔、中枢、简化线段、候选买卖点、支撑阻力、海底捞月和 CD+RSI 指标。可切换小级别笔线和简化线段。
+3. 图下显示最近中枢和结构信号，明细区域列出 RSI、Tide 与背离状态。海底捞月提示分小底／中底／大底／超大底。
+4. 点击“开始沪深300缠论扫描”，检查完整成分名单最近3根完整日线中的结构买点、海底捞月和 CD+RSI 底背离。多指标共振排在前面；扫描异常单独列出，结果可下载 CSV。
+
+缠论的分型需要后续 K 线确认，信号会有延迟。扫描只列出符合条件的近期买入提示；没有出现信号不等于没有风险。指标实现与参数说明见 `chan_engine.py`、`chan_addons.py` 及页面内说明。
 
 ## 云端仍失败时
 
