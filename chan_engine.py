@@ -359,7 +359,13 @@ def plot_chart(data: pd.DataFrame, minor: list[Pivot], major: list[Pivot], segme
             fig.add_trace(go.Scatter(x=cd.index[point], y=diff_line[point] * multiplier, mode='markers+text', text=[label] * int(point.sum()), textposition=position, name=f'CD+RSI {label}', marker={'color': color, 'size': 15, 'symbol': marker, 'line': {'color': 'white', 'width': 1}}), row=3, col=1)
     fig.add_hline(y=0, line={'color': '#8c8c8c', 'width': 1}, row=3, col=1)
     fig.update_yaxes(title_text='CD+RSI', row=3, col=1)
-    fig.update_xaxes(showgrid=False, showline=False, zeroline=False, type='category', nticks=10)
+    # Keep one true date axis across the candlesticks, shapes, annotations and
+    # indicator traces. A category axis converts datetimes into per-trace
+    # category positions; shapes can then land on a different category index
+    # and appear detached from the candles. Hide non-trading weekends while
+    # retaining date coordinates so every overlay shares the same x mapping.
+    fig.update_xaxes(showgrid=False, showline=False, zeroline=False, type='date',
+                     rangebreaks=[{'bounds': ['sat', 'mon']}], nticks=10)
     fig.update_yaxes(gridcolor='#243244', gridwidth=1, zerolinecolor='#62738a', tickfont={'color': '#b9c5d8'}, title_font={'color': '#b9c5d8'})
     fig.update_layout(template='plotly_dark', height=940, xaxis_rangeslider_visible=False, paper_bgcolor='#0e131c', plot_bgcolor='#0e131c', font={'color': '#d9e2ee'}, margin={'l': 12, 'r': 135, 't': 12, 'b': 12}, showlegend=False)
     return fig

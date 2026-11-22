@@ -40,3 +40,6 @@ def test_chan_structure_and_plot_build_from_a_share_daily_bars():
     assert len(minor) > 0
     assert len(figure.data) >= 6
     assert len(figure.layout.xaxis.matches) > 0
+    assert figure.layout.xaxis.type == "date"
+    assert figure.layout.xaxis2.type == "date"
+    assert figure.layout.xaxis3.type == "date"
